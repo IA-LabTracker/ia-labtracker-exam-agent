@@ -39,8 +39,14 @@ def reconcile_row(
     tema_raw = str(row.get("tema", ""))
     classificacao = row.get("classificacao")
     equivalencia = row.get("equivalencia")
+    logger.debug("[reconcile_row] processing tema='%s'", tema_raw[:50])
 
     norm_tema, norm_subtema = normalize_tema_subtema(tema_raw)
+    logger.debug(
+        "[reconcile_row] normalized: tema='%s' subtema='%s'",
+        norm_tema[:50],
+        norm_subtema[:50] if norm_subtema else "(none)",
+    )
 
     query = norm_tema
     if norm_subtema:
@@ -48,7 +54,9 @@ def reconcile_row(
     if equivalencia:
         query += f" {equivalencia}"
 
+    logger.debug("[reconcile_row] search query='%s'", query[:100])
     candidates: list[Candidate] = retrieve_candidates(query, embedder, db)
+    logger.debug("[reconcile_row] found %d candidates", len(candidates))
 
     matched_ids = [c.id for c in candidates]
     num_questions = len(candidates)
@@ -106,13 +114,28 @@ def reconcile_all(
     embedder: BaseEmbedder,
     db: DBClient,
 ) -> list[ReconciledRow]:
-    logger.info("Reconciling %d input rows", len(input_rows))
+    logger.info(
+        "[reconcile_all] starting reconciliation of %d input rows", len(input_rows)
+    )
     results = []
-    for i, row in enumerate(input_rows):
-        logger.debug("Processing row %d / %d", i + 1, len(input_rows))
-        result = reconcile_row(row, embedder, db)
-        results.append(result)
+    for i, row in enumerate(input_rows, start=1):
+        logger.info("[reconcile_all] processing row %d / %d", i, len(input_rows))
+        try:
+            result = reconcile_row(row, embedder, db)
+            results.append(result)
+        except Exception as exc:
+            logger.error(
+                "[reconcile_all] error on row %d / %d (tema='%s'): %s",
+                i,
+                len(input_rows),
+                row.get("tema", "(unknown)")[:50],
+                exc,
+                exc_info=True,
+            )
+            raise
 
     results.sort(key=lambda r: r.priority_score, reverse=True)
-    logger.info("Reconciliation complete: %d rows produced", len(results))
+    logger.info(
+        "[reconcile_all] reconciliation complete: %d rows produced", len(results)
+    )
     return results

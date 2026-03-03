@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
-from starlette.background import BackgroundTask
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 
 from src.aggregator.consolidate import reconcile_all
 from src.config import get_settings
@@ -129,29 +131,39 @@ async def reconcile(file: UploadFile = File(...)):
         # attempt to read input rows; if the workbook is invalid or doesn't
         # contain the expected columns we convert the error into a 400
         try:
+            logger.info("[reconcile] attempting to read Excel from %s", tmp_path.name)
             input_rows = read_excel(tmp_path)
+            logger.info("[reconcile] successfully parsed %d rows", len(input_rows))
         except Exception as exc:  # pandas or our ValueError
-            logger.exception("failed to read Excel input %s", tmp_path.name)
+            logger.exception("[reconcile] failed to read Excel input %s", tmp_path.name)
             raise HTTPException(
                 status_code=400,
                 detail=f"could not parse excel file: {exc}",
             )
 
+        logger.info("[reconcile] starting reconciliation pipeline...")
         results = reconcile_all(input_rows, embedder, db)
-        logger.info("reconciliation produced %d rows", len(results))
+        logger.info(
+            "[reconcile] reconciliation complete: %d rows produced", len(results)
+        )
 
-        out_path = Path(tempfile.mktemp(suffix=".xlsx"))
+        # save output to project root with timestamp
+        project_root = Path(__file__).parent.parent
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_filename = f"ranking_output_{timestamp}.xlsx"
+        out_path = project_root / out_filename
+        
         write_excel(results, out_path)
-        logger.info("wrote output workbook %s", out_path.name)
+        logger.info(
+            "[reconcile] wrote output workbook to project root: %s",
+            out_path.absolute(),
+        )
 
-        def cleanup():
-            out_path.unlink(missing_ok=True)
-
+        # return file for download AND save locally
         return FileResponse(
             path=str(out_path),
-            filename="ranking_output.xlsx",
+            filename=out_filename,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            background=BackgroundTask(cleanup),
         )
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -190,8 +202,30 @@ from fastapi import status
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
-    logger.error("request validation failed: %s", exc)
+    logger.error(
+        "request validation failed: %s | method=%s path=%s content-type=%s",
+        exc,
+        request.method,
+        request.url.path,
+        request.headers.get("content-type", "none"),
+    )
+    for error in exc.errors():
+        logger.error("  validation error: %s", error)
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={"detail": exc.errors()},
     )
+
+
+# middleware to log all incoming requests
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        method = request.method
+        path = request.url.path
+        content_type = request.headers.get("content-type", "none")
+        logger.info("[REQUEST] %s %s | content-type=%s", method, path, content_type)
+        response = await call_next(request)
+        return response
+
+
+app.add_middleware(LoggingMiddleware)

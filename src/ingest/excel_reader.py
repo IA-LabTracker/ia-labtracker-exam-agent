@@ -36,10 +36,12 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def read_excel(path: str | Path) -> list[dict[str, Any]]:
     path = Path(path)
-    logger.info("Reading Excel: %s", path.name)
+    logger.info("[read_excel] reading file: %s", path.name)
 
     df = pd.read_excel(path, engine="openpyxl")
+    logger.debug("[read_excel] raw columns from Excel: %s", list(df.columns))
     df = _normalize_columns(df)
+    logger.debug("[read_excel] normalized columns: %s", list(df.columns))
 
     if "tema" not in df.columns:
         raise ValueError(
@@ -49,9 +51,13 @@ def read_excel(path: str | Path) -> list[dict[str, Any]]:
 
     for col in ("classificacao", "equivalencia", "num_questoes"):
         if col not in df.columns:
+            logger.debug("[read_excel] column '%s' not found, adding as None", col)
             df[col] = None
 
+    logger.info("[read_excel] dropping rows with missing 'tema'")
     df = df.dropna(subset=["tema"])
     records = df.to_dict(orient="records")
-    logger.info("Read %d rows from %s", len(records), path.name)
+    logger.info(
+        "[read_excel] successfully read %d rows from %s", len(records), path.name
+    )
     return records

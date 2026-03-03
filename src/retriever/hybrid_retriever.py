@@ -32,7 +32,18 @@ def retrieve_candidates(
     settings = settings or get_settings()
     top_k = top_k or settings.retriever_top_k
 
+    logger.debug(
+        "[retrieve_candidates] generating embedding for query: '%s'", query[:100]
+    )
     embedding = embedder.embed(query)
+    logger.debug("[retrieve_candidates] embedding generated, dim=%d", len(embedding))
+
+    logger.debug(
+        "[retrieve_candidates] calling hybrid_search: top_k=%d alpha=%.2f beta=%.2f",
+        top_k,
+        settings.hybrid_alpha,
+        settings.hybrid_beta,
+    )
     rows = db.hybrid_search(
         query_embedding=embedding,
         query_text=query,
@@ -40,11 +51,14 @@ def retrieve_candidates(
         alpha=settings.hybrid_alpha,
         beta=settings.hybrid_beta,
     )
+    logger.debug("[retrieve_candidates] hybrid_search returned %d raw rows", len(rows))
 
     candidates = []
+    filtered_out = 0
     for r in rows:
         score = r.get("hybrid_score", 0) or 0
         if score < settings.similarity_threshold:
+            filtered_out += 1
             continue
         candidates.append(
             Candidate(
@@ -58,5 +72,11 @@ def retrieve_candidates(
             )
         )
 
-    logger.debug("Query '%s' returned %d candidates", query, len(candidates))
+    logger.debug(
+        "[retrieve_candidates] query '%s' returned %d candidates (%d filtered by threshold %.2f)",
+        query[:100],
+        len(candidates),
+        filtered_out,
+        settings.similarity_threshold,
+    )
     return candidates

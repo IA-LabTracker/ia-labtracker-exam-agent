@@ -83,11 +83,27 @@ class DBClient:
         alpha: float = 0.7,
         beta: float = 0.3,
     ) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT * FROM hybrid_search(%s::vector, %s, %s, %s, %s)",
-            (str(query_embedding), query_text, top_k, alpha, beta),
-        ).fetchall()
-        return list(rows)
+        logger.debug(
+            "[hybrid_search] executing SQL function with: query_text='%s' top_k=%d alpha=%.2f beta=%.2f",
+            query_text[:100],
+            top_k,
+            alpha,
+            beta,
+        )
+        try:
+            rows = self.conn.execute(
+                "SELECT * FROM hybrid_search(%s::vector, %s, %s, %s, %s)",
+                (str(query_embedding), query_text, top_k, alpha, beta),
+            ).fetchall()
+            logger.debug("[hybrid_search] query returned %d rows", len(rows))
+            return list(rows)
+        except Exception as exc:
+            logger.error(
+                "[hybrid_search] error executing SQL function: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
 
     def file_already_ingested(self, file_hash: str) -> bool:
         row = self.conn.execute(

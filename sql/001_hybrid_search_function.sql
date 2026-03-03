@@ -2,18 +2,17 @@ CREATE OR REPLACE FUNCTION hybrid_search(
     query_embedding vector(384),
     query_text text,
     match_count int DEFAULT 5,
-    alpha float DEFAULT 0.7,
-    beta float DEFAULT 0.3
+    alpha double precision DEFAULT 0.7,
+    beta double precision DEFAULT 0.3
 ) RETURNS TABLE (
     id bigint,
     tema_normalized text,
     subtema_normalized text,
     raw_text text,
-    similarity float,
-    fts_score float,
-    hybrid_score float
-) LANGUAGE plpgsql STABLE AS
-$func$
+    similarity double precision,
+    fts_score double precision,
+    hybrid_score double precision
+) LANGUAGE plpgsql STABLE AS $func$
 BEGIN
     RETURN QUERY
     WITH vector_results AS (
@@ -50,9 +49,9 @@ BEGIN
             COALESCE(v.tema_normalized, f.tema_normalized) AS tema_normalized,
             COALESCE(v.subtema_normalized, f.subtema_normalized) AS subtema_normalized,
             COALESCE(v.raw_text, f.raw_text) AS raw_text,
-            COALESCE(v.similarity, 0.0) AS similarity,
-            COALESCE(f.fts_score, 0.0) AS fts_score,
-            (alpha * COALESCE(v.similarity, 0.0) + beta * COALESCE(f.fts_score, 0.0)) AS hybrid_score
+            COALESCE(v.similarity, 0.0)::double precision AS similarity,
+            COALESCE(f.fts_score, 0.0)::double precision AS fts_score,
+            (alpha * COALESCE(v.similarity, 0.0)::double precision + beta * COALESCE(f.fts_score, 0.0)::double precision)::double precision AS hybrid_score
         FROM
             vector_results v
         FULL OUTER JOIN
