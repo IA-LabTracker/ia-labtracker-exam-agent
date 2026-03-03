@@ -1,30 +1,44 @@
-from typing import List, Dict, Optional
-import pdfplumber
+from __future__ import annotations
+
+import hashlib
 import re
+from pathlib import Path
+from typing import Any
 
-from src.db.client import DBClient
-from src.embeddings.embedder import Embedder
+import pdfplumber
+
+from src.normalize.normalizer import classify_color, normalize_tema_subtema
+from src.utils.logging import logger
 
 
-def parse_pdf(path: str) -> List[Dict]:
-    """Extract question entries from a PDF file.
+def file_hash(path: str | Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
-    Returned list contains dicts with keys: text, tema, subtema.
-    Simple heuristics look for lines prefixed by numbers and for
-    preceding "Tema"/"Subtema" markers. Results are best-effort; manual
-    review may be required for unstructured PDFs.
-    """
-    entries: List[Dict] = []
-    with pdfplumber.open(path) as pdf:
+
+def extract_questions(
+    pdf_path: str | Path,
+    institution: str = "unknown",
+    year: int | None = None,
+) -> list[dict[str, Any]]:
+    pdf_path = Path(pdf_path)
+    logger.info("Extracting questions from %s", pdf_path.name)
+    entries: list[dict[str, Any]] = []
+
+    with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
             lines = text.splitlines()
-            tema: Optional[str] = None
-            subtema: Optional[str] = None
-            buffer: List[str] = []
+            tema: str | None = None
+            subtema: str | None = None
+            buffer: list[str] = []
+
             for line in lines:
-                m_tema = re.match(r"^Tema[:\s]+(.+)", line, re.I)
-                m_sub = re.match(r"^Subtema[:\s]+(.+)", line, re.I)
+                m_tema = re.match(r"^Tema[:\s]+(.+)", line, re.IGNORECASE)
+                m_sub = re.match(r"^Subtema[:\s]+(.+)", line, re.IGNORECASE)
                 if m_tema:
                     tema = m_tema.group(1).strip()
                     continue
@@ -35,50 +49,97 @@ def parse_pdf(path: str) -> List[Dict]:
                     buffer.append(line)
                 elif buffer:
                     buffer[-1] += " " + line
+
             for q in buffer:
-                entries.append({"text": q, "tema": tema, "subtema": subtema})
+                norm_tema, norm_sub = normalize_tema_subtema(tema or "", subtema)
+                entries.append(
+                    {
+                        "institution": institution,
+                        "year": year,
+                        "raw_text": q,
+                        "tema_normalized": norm_tema,
+                        "subtema_normalized": norm_sub,
+                        "source_file": pdf_path.name,
+                    }
+                )
+
+    logger.info("Extracted %d questions from %s", len(entries), pdf_path.name)
     return entries
 
 
-def ingest_pdf(
-    path: str, db: Optional[DBClient] = None, embedder: Optional[Embedder] = None
-) -> int:
-    """Parse and upsert questions from a PDF file into the database.
+_METRICS_LINE = re.compile(
+    r"(\d+)[ºª°]\s+(.+?)\s*[—\-–]\s*([\d.,]+)%\s*\((\d+)\s*quest[õo]es?\)",
+    re.IGNORECASE,
+)
 
-    Returns the number of new/updated entries processed.
-    """
-    db = db or DBClient()
-    embedder = embedder or Embedder()
-    entries = parse_pdf(path)
-    to_process: List[Dict] = []
-    for e in entries:
-        existing = db.fetch(
-            "SELECT id, embedding FROM questions WHERE raw_text=%s", e["text"]
-        )
-        if existing and existing[0].get("embedding"):
-            continue
-        to_process.append(e)
-    if not to_process:
-        return 0
-    # batch embed
-    texts = [e["text"] for e in to_process]
-    embeddings = embedder.embed(texts)
-    for e, emb in zip(to_process, embeddings):
-        existing = db.fetch("SELECT id FROM questions WHERE raw_text=%s", e["text"])
-        if existing:
-            db.execute(
-                "UPDATE questions SET tema_normalized=%s, subtema_normalized=%s, embedding=%s WHERE id=%s",
-                e.get("tema"),
-                e.get("subtema"),
-                emb,
-                existing[0]["id"],
-            )
-        else:
-            db.execute(
-                "INSERT INTO questions(raw_text, tema_normalized, subtema_normalized, embedding) VALUES (%s,%s,%s,%s)",
-                e["text"],
-                e.get("tema"),
-                e.get("subtema"),
-                emb,
-            )
-    return len(to_process)
+
+def extract_theme_stats(
+    pdf_path: str | Path, institution: str = "unknown"
+) -> list[dict[str, Any]]:
+    pdf_path = Path(pdf_path)
+    logger.info("Extracting theme stats from %s", pdf_path.name)
+    results: list[dict[str, Any]] = []
+
+    current_area: str | None = None
+    current_tema: str | None = None
+    section: str = "area"
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+
+                lower = line.lower()
+                if "área" in lower or "area" in lower:
+                    section = "area"
+                    continue
+                if "tema" in lower and "subtema" not in lower:
+                    section = "tema"
+                    continue
+                if "subtema" in lower:
+                    section = "subtema"
+                    continue
+
+                m = _METRICS_LINE.match(line)
+                if not m:
+                    continue
+
+                ranking = int(m.group(1))
+                name = m.group(2).strip()
+                pct = float(m.group(3).replace(",", "."))
+                nq = int(m.group(4))
+                cor, cor_hex = classify_color(nq)
+
+                if section == "area":
+                    current_area = name
+                    current_tema = None
+                elif section == "tema":
+                    current_tema = name
+
+                row: dict[str, Any] = {
+                    "institution": institution,
+                    "ranking": ranking,
+                    "category": section,
+                    "tema": current_tema or current_area or name,
+                    "subtema": name if section == "subtema" else None,
+                    "percentage": pct,
+                    "num_questions": nq,
+                    "cor": cor,
+                    "cor_hex": cor_hex,
+                    "source_file": pdf_path.name,
+                }
+
+                if section == "area":
+                    row["tema"] = name
+                    row["subtema"] = None
+                elif section == "tema":
+                    row["tema"] = name
+                    row["subtema"] = None
+
+                results.append(row)
+
+    logger.info("Extracted %d theme stats from %s", len(results), pdf_path.name)
+    return results

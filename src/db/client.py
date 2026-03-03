@@ -1,40 +1,148 @@
-from typing import Optional
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+from typing import Any
+
 import psycopg
 from psycopg.rows import dict_row
-from src.config import settings
+
+from src.config import get_settings
+from src.utils.logging import logger
 
 
 class DBClient:
-    def __init__(self, dsn: Optional[str] = None):
-        self.dsn = dsn or settings.DATABASE_URL
-        self.conn = psycopg.connect(self.dsn, row_factory=dict_row)
+    def __init__(self, dsn: str | None = None):
+        self._dsn = dsn or get_settings().database_url
+        self._conn: psycopg.Connection | None = None
 
-    def execute(self, sql: str, *args, **kwargs):
-        with self.conn.cursor() as cur:
-            cur.execute(sql, *args, **kwargs)
-            return cur
+    def connect(self) -> DBClient:
+        self._conn = psycopg.connect(self._dsn, row_factory=dict_row, autocommit=True)
+        logger.info("Connected to database")
+        return self
 
-    def fetch(self, sql: str, *args, **kwargs):
-        with self.conn.cursor() as cur:
-            cur.execute(sql, *args, **kwargs)
-            return cur.fetchall()
+    @property
+    def conn(self) -> psycopg.Connection:
+        if self._conn is None:
+            self.connect()
+        return self._conn
 
-    def close(self):
-        self.conn.close()
+    def close(self) -> None:
+        if self._conn:
+            self._conn.close()
+            self._conn = None
 
+    def run_migrations(self) -> None:
+        sql_dir = get_settings().sql_dir
+        if not sql_dir.exists():
+            logger.warning("SQL dir not found: %s", sql_dir)
+            return
+        files = sorted(sql_dir.glob("*.sql"))
+        for f in files:
+            logger.info("Running migration: %s", f.name)
+            self.conn.execute(f.read_text(encoding="utf-8"))
+        logger.info("All migrations applied")
 
-# simple supabase wrapper if keys provided
-from supabase import create_client
+    def upsert_questions(self, questions: list[dict[str, Any]]) -> int:
+        count = 0
+        with self.conn.transaction():
+            for q in questions:
+                content = q.get("raw_text", "")
+                chash = hashlib.sha256(content.encode()).hexdigest()
+                self.conn.execute(
+                    """
+                    INSERT INTO questions (institution, year, raw_text, tema_normalized, subtema_normalized, source_file, content_hash)
+                    VALUES (%(institution)s, %(year)s, %(raw_text)s, %(tema_normalized)s, %(subtema_normalized)s, %(source_file)s, %(content_hash)s)
+                    ON CONFLICT (content_hash) DO UPDATE SET
+                        tema_normalized = EXCLUDED.tema_normalized,
+                        subtema_normalized = EXCLUDED.subtema_normalized
+                    """,
+                    {**q, "content_hash": chash},
+                )
+                count += 1
+        return count
 
+    def get_questions_without_embeddings(self) -> list[dict]:
+        return list(
+            self.conn.execute(
+                "SELECT id, raw_text, tema_normalized, subtema_normalized FROM questions WHERE embedding IS NULL"
+            ).fetchall()
+        )
 
-class SupabaseClient:
-    def __init__(self):
-        if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
-            raise ValueError("Supabase credentials not set")
-        self.client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+    def update_embedding(self, question_id: int, embedding: list[float]) -> None:
+        self.conn.execute(
+            "UPDATE questions SET embedding = %s::vector WHERE id = %s",
+            (str(embedding), question_id),
+        )
 
-    def table(self, name: str):
-        return self.client.table(name)
+    def hybrid_search(
+        self,
+        query_embedding: list[float],
+        query_text: str,
+        top_k: int = 5,
+        alpha: float = 0.7,
+        beta: float = 0.3,
+    ) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM hybrid_search(%s::vector, %s, %s, %s, %s)",
+            (str(query_embedding), query_text, top_k, alpha, beta),
+        ).fetchall()
+        return list(rows)
 
-    def rpc(self, name: str, params: dict):
-        return self.client.rpc(name, params)
+    def file_already_ingested(self, file_hash: str) -> bool:
+        row = self.conn.execute(
+            "SELECT id FROM ingest_log WHERE file_hash = %s", (file_hash,)
+        ).fetchone()
+        return row is not None
+
+    def record_ingest(self, file_name: str, file_hash: str, row_count: int) -> None:
+        self.conn.execute(
+            "INSERT INTO ingest_log (file_name, file_hash, row_count) VALUES (%s, %s, %s) ON CONFLICT (file_hash) DO NOTHING",
+            (file_name, file_hash, row_count),
+        )
+
+    def upsert_theme_stats(self, rows: list[dict[str, Any]]) -> int:
+        count = 0
+        with self.conn.transaction():
+            for r in rows:
+                self.conn.execute(
+                    """
+                    INSERT INTO theme_stats (institution, ranking, category, tema, subtema, percentage, num_questions, cor, cor_hex, source_file)
+                    VALUES (%(institution)s, %(ranking)s, %(category)s, %(tema)s, %(subtema)s, %(percentage)s, %(num_questions)s, %(cor)s, %(cor_hex)s, %(source_file)s)
+                    ON CONFLICT (institution, category, tema, subtema) DO UPDATE SET
+                        ranking = EXCLUDED.ranking,
+                        percentage = EXCLUDED.percentage,
+                        num_questions = EXCLUDED.num_questions,
+                        cor = EXCLUDED.cor,
+                        cor_hex = EXCLUDED.cor_hex
+                    """,
+                    r,
+                )
+                count += 1
+        return count
+
+    def get_theme_stat(
+        self, tema: str, subtema: str | None = None, institution: str | None = None
+    ) -> dict | None:
+        if subtema:
+            row = self.conn.execute(
+                "SELECT * FROM theme_stats WHERE lower(tema) = lower(%s) AND lower(subtema) = lower(%s)"
+                + (" AND institution = %s" if institution else "")
+                + " LIMIT 1",
+                (tema, subtema, institution) if institution else (tema, subtema),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM theme_stats WHERE lower(tema) = lower(%s) AND subtema IS NULL"
+                + (" AND institution = %s" if institution else "")
+                + " LIMIT 1",
+                (tema, institution) if institution else (tema,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def search_theme_stats_fts(self, query: str, limit: int = 10) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM theme_stats WHERE fts @@ plainto_tsquery('portuguese', %s) ORDER BY num_questions DESC LIMIT %s",
+            (query, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]

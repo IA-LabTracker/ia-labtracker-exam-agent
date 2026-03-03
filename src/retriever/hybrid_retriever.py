@@ -1,43 +1,62 @@
-from typing import List, Dict
-from src.embeddings.embedder import Embedder
-from src.db.client import DBClient, SupabaseClient
-from src.config import settings
-import logging
+from __future__ import annotations
 
-logger = logging.getLogger(__name__)
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from src.config import get_settings
+from src.utils.logging import logger
+
+if TYPE_CHECKING:
+    from src.db.client import DBClient
+    from src.embeddings.embedder import BaseEmbedder
 
 
-def retrieve_candidates(text: str, top_k: int = 5, alpha: float = 0.7) -> List[Dict]:
-    """Return candidate rows from the hybrid_search function.
+@dataclass
+class Candidate:
+    id: int
+    tema_normalized: str | None
+    subtema_normalized: str | None
+    raw_text: str
+    similarity: float
+    fts_score: float
+    hybrid_score: float
 
-    The database function signature changed; it now expects the embedding
-    first and the textual query second, with optional alpha/beta weights.
-    """
-    emb = Embedder().embed_single(text)
-    try:
-        if settings.SUPABASE_URL and settings.SUPABASE_KEY:
-            supa = SupabaseClient()
-            resp = supa.rpc(
-                "hybrid_search",
-                {
-                    "query_embedding": emb,
-                    "query_text": text,
-                    "match_count": top_k,
-                    "alpha": alpha,
-                },
+
+def retrieve_candidates(
+    query: str,
+    embedder: BaseEmbedder,
+    db: DBClient,
+    top_k: int | None = None,
+    settings=None,
+) -> list[Candidate]:
+    settings = settings or get_settings()
+    top_k = top_k or settings.retriever_top_k
+
+    embedding = embedder.embed(query)
+    rows = db.hybrid_search(
+        query_embedding=embedding,
+        query_text=query,
+        top_k=top_k,
+        alpha=settings.hybrid_alpha,
+        beta=settings.hybrid_beta,
+    )
+
+    candidates = []
+    for r in rows:
+        score = r.get("hybrid_score", 0) or 0
+        if score < settings.similarity_threshold:
+            continue
+        candidates.append(
+            Candidate(
+                id=r["id"],
+                tema_normalized=r.get("tema_normalized"),
+                subtema_normalized=r.get("subtema_normalized"),
+                raw_text=r.get("raw_text", ""),
+                similarity=r.get("similarity", 0) or 0,
+                fts_score=r.get("fts_score", 0) or 0,
+                hybrid_score=score,
             )
-            return resp if resp else []
-        else:
-            db = DBClient()
-            # note order: embedding then text
-            rows = db.fetch(
-                "SELECT * FROM hybrid_search(%s::vector, %s, %s, %s)",
-                emb,
-                text,
-                top_k,
-                alpha,
-            )
-            return rows
-    except Exception as exc:
-        logger.error("hybrid retrieval failed", exc_info=exc)
-        return []
+        )
+
+    logger.debug("Query '%s' returned %d candidates", query, len(candidates))
+    return candidates

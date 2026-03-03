@@ -1,16 +1,17 @@
 version: "3.9"
 services:
   db:
-    image: postgres:15
+    image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_DB: examdb
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
+      POSTGRES_DB: exam_reconciler
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     volumes:
       - db_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d
     ports:
       - "5432:5432"
-    command: ["postgres", "-c", "shared_preload_libraries=pgvector"]
+
   app:
     build: .
     volumes:
@@ -21,5 +22,6 @@ services:
       - "8000:8000"
     depends_on:
       - db
+
 volumes:
   db_data:

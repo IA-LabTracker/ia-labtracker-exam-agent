@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 import logging
-from src.config import settings
 
+logger = logging.getLogger("exam_reconciler")
 
-def configure_logging():
-    level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
-    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(message)s")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)

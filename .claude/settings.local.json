@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(for d in src src/db src/ingest src/normalize src/embeddings src/retriever src/aggregator src/exporters src/utils tests)",
+      "Bash(do touch \"c:/projetos/ia-labtracker-exam-agent/$d/__init__.py\")",
+      "Bash(done)",
+      "Bash(python -m pytest tests/ -v)"
+    ]
+  }
+}

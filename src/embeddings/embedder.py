@@ -1,36 +1,57 @@
-from typing import List, Optional
-import os
-from src.config import settings
+from __future__ import annotations
 
-_embed_model = None
+from abc import ABC, abstractmethod
+
+from src.config import get_settings
+from src.utils.logging import logger
 
 
-def _get_local_model():
-    global _embed_model
-    if _embed_model is None:
+class BaseEmbedder(ABC):
+    @abstractmethod
+    def embed(self, text: str) -> list[float]: ...
+
+    @abstractmethod
+    def embed_batch(self, texts: list[str]) -> list[list[float]]: ...
+
+
+class LocalEmbedder(BaseEmbedder):
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         from sentence_transformers import SentenceTransformer
 
-        _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _embed_model
+        self._model = SentenceTransformer(model_name)
+        logger.info("Loaded local model: %s", model_name)
+
+    def embed(self, text: str) -> list[float]:
+        return self._model.encode([text], show_progress_bar=False)[0].tolist()
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return self._model.encode(texts, show_progress_bar=False).tolist()
+
+
+class OpenAIEmbedder(BaseEmbedder):
+    def __init__(self, api_key: str, model: str = "text-embedding-3-small"):
+        from openai import OpenAI
+
+        self._client = OpenAI(api_key=api_key)
+        self._model = model
+        logger.info("Using OpenAI embedder: %s", model)
+
+    def embed(self, text: str) -> list[float]:
+        resp = self._client.embeddings.create(model=self._model, input=[text])
+        return resp.data[0].embedding
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        resp = self._client.embeddings.create(model=self._model, input=texts)
+        return [d.embedding for d in resp.data]
 
 
 class Embedder:
-    def __init__(self, provider: Optional[str] = None):
-        self.provider = provider or settings.EMBEDDINGS_PROVIDER
-        if self.provider == "openai":
-            import openai
-
-            openai.api_key = settings.OPENAI_API_KEY
-
-    def embed(self, texts: List[str]) -> List[List[float]]:
-        if self.provider == "local":
-            model = _get_local_model()
-            return model.encode(texts, show_progress_bar=False).tolist()
-        else:
-            import openai
-
-            resp = openai.Embedding.create(model="text-embedding-3-small", input=texts)
-            return [e["embedding"] for e in resp.data]
-
-    def embed_single(self, text: str) -> List[float]:
-        return self.embed([text])[0]
+    @staticmethod
+    def create(settings=None) -> BaseEmbedder:
+        settings = settings or get_settings()
+        if settings.embeddings_provider == "openai":
+            return OpenAIEmbedder(
+                api_key=settings.openai_api_key,
+                model=settings.embedding_model,
+            )
+        return LocalEmbedder(model_name=settings.embedding_model)

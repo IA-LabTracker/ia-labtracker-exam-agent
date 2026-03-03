@@ -1,4 +1,3 @@
--- migration: create theme_stats table and indexes (schema only)
 CREATE TABLE IF NOT EXISTS theme_stats (
     id BIGSERIAL PRIMARY KEY,
     institution TEXT NOT NULL,
@@ -16,19 +15,15 @@ CREATE TABLE IF NOT EXISTS theme_stats (
 );
 
 CREATE INDEX IF NOT EXISTS idx_theme_stats_institution ON theme_stats(institution);
-
 CREATE INDEX IF NOT EXISTS idx_theme_stats_tema ON theme_stats(tema);
-
 CREATE INDEX IF NOT EXISTS idx_theme_stats_cor ON theme_stats(cor);
 
-ALTER TABLE
-    theme_stats
-ADD
-    COLUMN IF NOT EXISTS fts tsvector GENERATED ALWAYS AS (
-        to_tsvector(
-            'portuguese',
-            coalesce(tema, '') || ' ' || coalesce(subtema, '')
-        )
-    ) STORED;
+ALTER TABLE theme_stats
+ADD COLUMN IF NOT EXISTS fts tsvector GENERATED ALWAYS AS (
+    to_tsvector(
+        'portuguese',
+        coalesce(tema, '') || ' ' || coalesce(subtema, '')
+    )
+) STORED;
 
 CREATE INDEX IF NOT EXISTS idx_theme_stats_fts ON theme_stats USING gin(fts);

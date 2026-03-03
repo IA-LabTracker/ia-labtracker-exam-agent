@@ -1,5 +1,4 @@
-CREATE
-OR REPLACE FUNCTION hybrid_search(
+CREATE OR REPLACE FUNCTION hybrid_search(
     query_embedding vector(384),
     query_text text,
     match_count int DEFAULT 5,
@@ -13,64 +12,65 @@ OR REPLACE FUNCTION hybrid_search(
     similarity float,
     fts_score float,
     hybrid_score float
-) LANGUAGE plpgsql STABLE AS $ func $ BEGIN RETURN QUERY WITH vector_results AS (
+) LANGUAGE plpgsql STABLE AS
+$func$
+BEGIN
+    RETURN QUERY
+    WITH vector_results AS (
+        SELECT
+            q.id,
+            q.tema_normalized,
+            q.subtema_normalized,
+            q.raw_text,
+            1 - (q.embedding <=> query_embedding) AS similarity
+        FROM
+            questions q
+        WHERE
+            q.embedding IS NOT NULL
+        ORDER BY
+            q.embedding <=> query_embedding
+        LIMIT
+            match_count * 3
+    ), fts_results AS (
+        SELECT
+            q.id,
+            q.tema_normalized,
+            q.subtema_normalized,
+            q.raw_text,
+            ts_rank_cd(q.fts, plainto_tsquery('portuguese', query_text)) AS fts_score
+        FROM
+            questions q
+        WHERE
+            q.fts @@ plainto_tsquery('portuguese', query_text)
+        LIMIT
+            match_count * 3
+    ), combined AS (
+        SELECT
+            COALESCE(v.id, f.id) AS id,
+            COALESCE(v.tema_normalized, f.tema_normalized) AS tema_normalized,
+            COALESCE(v.subtema_normalized, f.subtema_normalized) AS subtema_normalized,
+            COALESCE(v.raw_text, f.raw_text) AS raw_text,
+            COALESCE(v.similarity, 0.0) AS similarity,
+            COALESCE(f.fts_score, 0.0) AS fts_score,
+            (alpha * COALESCE(v.similarity, 0.0) + beta * COALESCE(f.fts_score, 0.0)) AS hybrid_score
+        FROM
+            vector_results v
+        FULL OUTER JOIN
+            fts_results f ON v.id = f.id
+    )
     SELECT
-        q.id,
-        q.tema_normalized,
-        q.subtema_normalized,
-        q.raw_text,
-        1 - (q.embedding <= > query_embedding) AS similarity
+        combined.id,
+        combined.tema_normalized,
+        combined.subtema_normalized,
+        combined.raw_text,
+        combined.similarity,
+        combined.fts_score,
+        combined.hybrid_score
     FROM
-        questions q
-    WHERE
-        q.embedding IS NOT NULL
+        combined
     ORDER BY
-        q.embedding <= > query_embedding
+        combined.hybrid_score DESC
     LIMIT
-        match_count * 3
-), fts_results AS (
-    SELECT
-        q.id,
-        q.tema_normalized,
-        q.subtema_normalized,
-        q.raw_text,
-        ts_rank_cd(q.fts, plainto_tsquery('portuguese', query_text)) AS fts_score
-    FROM
-        questions q
-    WHERE
-        q.fts @ @ plainto_tsquery('portuguese', query_text)
-    LIMIT
-        match_count * 3
-), combined AS (
-    SELECT
-        COALESCE(v.id, f.id) AS id,
-        COALESCE(v.tema_normalized, f.tema_normalized) AS tema_normalized,
-        COALESCE(v.subtema_normalized, f.subtema_normalized) AS subtema_normalized,
-        COALESCE(v.raw_text, f.raw_text) AS raw_text,
-        COALESCE(v.similarity, 0.0) AS similarity,
-        COALESCE(f.fts_score, 0.0) AS fts_score,
-        (
-            alpha * COALESCE(v.similarity, 0.0) + beta * COALESCE(f.fts_score, 0.0)
-        ) AS hybrid_score
-    FROM
-        vector_results v FULL
-        OUTER JOIN fts_results f ON v.id = f.id
-)
-SELECT
-    combined.id,
-    combined.tema_normalized,
-    combined.subtema_normalized,
-    combined.raw_text,
-    combined.similarity,
-    combined.fts_score,
-    combined.hybrid_score
-FROM
-    combined
-ORDER BY
-    combined.hybrid_score DESC
-LIMIT
-    match_count;
-
+        match_count;
 END;
-
-$ func $;
+$func$;

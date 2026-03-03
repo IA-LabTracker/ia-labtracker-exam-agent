@@ -1,18 +1,60 @@
+from __future__ import annotations
+
 import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
+@dataclass(frozen=True)
 class Settings:
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
-    SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
-    SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
-    EMBEDDINGS_PROVIDER: str = os.getenv("EMBEDDINGS_PROVIDER", "local")
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    HOST: str = os.getenv("HOST", "0.0.0.0")
-    PORT: int = int(os.getenv("PORT", "8000"))
-    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    database_url: str = field(
+        default_factory=lambda: os.getenv(
+            "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/exam_reconciler"
+        )
+    )
+    supabase_url: str = field(default_factory=lambda: os.getenv("SUPABASE_URL", ""))
+    supabase_key: str = field(default_factory=lambda: os.getenv("SUPABASE_KEY", ""))
+
+    embeddings_provider: str = field(
+        default_factory=lambda: os.getenv("EMBEDDINGS_PROVIDER", "local")
+    )
+    openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
+    embedding_model: str = field(
+        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    )
+    embedding_dim: int = field(
+        default_factory=lambda: int(os.getenv("EMBEDDING_DIM", "384"))
+    )
+
+    hybrid_alpha: float = field(
+        default_factory=lambda: float(os.getenv("HYBRID_ALPHA", "0.7"))
+    )
+    hybrid_beta: float = field(
+        default_factory=lambda: float(os.getenv("HYBRID_BETA", "0.3"))
+    )
+    similarity_threshold: float = field(
+        default_factory=lambda: float(os.getenv("SIMILARITY_THRESHOLD", "0.4"))
+    )
+    retriever_top_k: int = field(
+        default_factory=lambda: int(os.getenv("RETRIEVER_TOP_K", "5"))
+    )
+
+    log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
+    api_host: str = field(default_factory=lambda: os.getenv("API_HOST", "0.0.0.0"))
+    api_port: int = field(default_factory=lambda: int(os.getenv("API_PORT", "8000")))
+
+    @property
+    def use_supabase(self) -> bool:
+        return bool(self.supabase_url and self.supabase_key)
+
+    @property
+    def sql_dir(self) -> Path:
+        return Path(__file__).parent.parent / "sql"
 
 
-settings = Settings()
+def get_settings() -> Settings:
+    return Settings()

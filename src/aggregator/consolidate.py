@@ -1,81 +1,118 @@
-from typing import List, Dict
-from src.normalize.normalizer import normalize_tema_subtema
-from src.retriever.hybrid_retriever import retrieve_candidates
-from src.db.client import DBClient
+from __future__ import annotations
 
-DEFAULT_WEIGHTS = {"similarity": 0.6, "freq": 0.4}
+from dataclasses import dataclass, field
+from typing import Any, TYPE_CHECKING
+
+from src.normalize.normalizer import classify_color, normalize_tema_subtema
+from src.retriever.hybrid_retriever import Candidate, retrieve_candidates
+from src.utils.logging import logger
+
+if TYPE_CHECKING:
+    from src.db.client import DBClient
+    from src.embeddings.embedder import BaseEmbedder
+
+W_FREQ = 0.4
+W_SIM = 0.6
 
 
-def consolidate(rows: List[Dict]) -> List[Dict]:
-    """Aggregate input Excel rows into a normalized output.
+@dataclass
+class ReconciledRow:
+    input_tema: str
+    input_classificacao: str | None
+    input_equivalencia: str | None
+    normalized_tema: str
+    normalized_subtema: str | None
+    similarity: float
+    num_questions: int
+    cor: str = "verde"
+    cor_hex: str = "#22C55E"
+    matched_ids: list[int] = field(default_factory=list)
+    priority_score: float = 0.0
+    notes: str = ""
 
-    Each returned dict includes provenance fields used for tracking and
-    ranking. The caller can sort by `priority_score` if desired.
-    """
-    db = DBClient()
-    output: List[Dict] = []
 
-    for row in rows:
-        tema_norm, sub_norm = normalize_tema_subtema(row.get("tema"))
-        query_text = f"{tema_norm} {sub_norm}".strip()
-        candidates = retrieve_candidates(query_text)
+def reconcile_row(
+    row: dict[str, Any],
+    embedder: BaseEmbedder,
+    db: DBClient,
+) -> ReconciledRow:
+    tema_raw = str(row.get("tema", ""))
+    classificacao = row.get("classificacao")
+    equivalencia = row.get("equivalencia")
 
-        provenance = []
-        for cand in candidates:
-            cnt_rows = db.fetch(
-                "SELECT count(*) as cnt FROM questions WHERE id=%s", cand["id"]
-            )
-            cnt = cnt_rows[0]["cnt"] if cnt_rows else 0
-            provenance.append(
-                {
-                    "id": cand["id"],
-                    "tema": cand.get("tema"),
-                    "subtema": cand.get("subtema"),
-                    "hybrid_score": cand.get("hybrid_score", 0),
-                    "fts_score": cand.get("fts_score", 0),
-                    "vector_score": cand.get("vector_score", 0),
-                    "num_questions": cnt,
-                }
-            )
+    norm_tema, norm_subtema = normalize_tema_subtema(tema_raw)
 
-        top_similarity = max((p["hybrid_score"] for p in provenance), default=0)
-        freq_sum = sum(p["num_questions"] for p in provenance)
-        priority_score = (
-            top_similarity * DEFAULT_WEIGHTS["similarity"]
-            + freq_sum * DEFAULT_WEIGHTS["freq"]
-        )
+    query = norm_tema
+    if norm_subtema:
+        query += f" {norm_subtema}"
+    if equivalencia:
+        query += f" {equivalencia}"
 
-        # attempt to look up ranking/color info from theme_stats
-        stats = db.fetch(
-            "SELECT ranking, category, percentage, cor, cor_hex"
-            " FROM theme_stats WHERE tema=%s AND (subtema IS NULL OR subtema=%s) LIMIT 1",
-            tema_norm,
-            sub_norm,
-        )
-        stat = stats[0] if stats else {}
+    candidates: list[Candidate] = retrieve_candidates(query, embedder, db)
 
-        outrow = {
-            "input_tema": row.get("tema"),
-            "input_classificacao": row.get("classificacao"),
-            "input_equivalencia": row.get("equivalencia"),
-            "normalized_tema": tema_norm,
-            "normalized_subtema": sub_norm,
-            "similarity": top_similarity,
-            "num_questions": provenance[0]["num_questions"] if provenance else 0,
-            "matched_ids": [p["id"] for p in provenance],
-            "notes": "",
-            "priority_score": priority_score,
-        }
-        if stat:
-            outrow.update(
-                {
-                    "ranking": stat.get("ranking"),
-                    "category": stat.get("category"),
-                    "percentage": stat.get("percentage"),
-                    "cor": stat.get("cor"),
-                    "cor_hex": stat.get("cor_hex"),
-                }
-            )
-        output.append(outrow)
+    matched_ids = [c.id for c in candidates]
+    num_questions = len(candidates)
+    avg_sim = (
+        sum(c.similarity for c in candidates) / len(candidates) if candidates else 0.0
+    )
+    best_candidate = candidates[0] if candidates else None
 
-    return output
+    final_tema = (
+        best_candidate.tema_normalized or norm_tema if best_candidate else norm_tema
+    )
+    final_subtema = (
+        best_candidate.subtema_normalized or norm_subtema
+        if best_candidate
+        else norm_subtema
+    )
+
+    priority = W_FREQ * num_questions + W_SIM * avg_sim
+
+    stat = db.get_theme_stat(final_tema, final_subtema)
+    if stat:
+        cor = stat["cor"]
+        cor_hex = stat["cor_hex"]
+        db_questions = stat["num_questions"]
+        if db_questions > num_questions:
+            num_questions = db_questions
+    else:
+        cor, cor_hex = classify_color(num_questions)
+
+    notes_parts = []
+    if not candidates:
+        notes_parts.append("No matches found in DB")
+    if classificacao:
+        notes_parts.append(f"classificacao={classificacao}")
+    notes = "; ".join(notes_parts)
+
+    return ReconciledRow(
+        input_tema=tema_raw,
+        input_classificacao=str(classificacao) if classificacao else None,
+        input_equivalencia=str(equivalencia) if equivalencia else None,
+        normalized_tema=final_tema,
+        normalized_subtema=final_subtema,
+        similarity=round(avg_sim, 4),
+        num_questions=num_questions,
+        cor=cor,
+        cor_hex=cor_hex,
+        matched_ids=matched_ids,
+        priority_score=round(priority, 4),
+        notes=notes,
+    )
+
+
+def reconcile_all(
+    input_rows: list[dict[str, Any]],
+    embedder: BaseEmbedder,
+    db: DBClient,
+) -> list[ReconciledRow]:
+    logger.info("Reconciling %d input rows", len(input_rows))
+    results = []
+    for i, row in enumerate(input_rows):
+        logger.debug("Processing row %d / %d", i + 1, len(input_rows))
+        result = reconcile_row(row, embedder, db)
+        results.append(result)
+
+    results.sort(key=lambda r: r.priority_score, reverse=True)
+    logger.info("Reconciliation complete: %d rows produced", len(results))
+    return results
