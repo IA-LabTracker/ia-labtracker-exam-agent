@@ -4,7 +4,19 @@
       "Bash(for d in src src/db src/ingest src/normalize src/embeddings src/retriever src/aggregator src/exporters src/utils tests)",
       "Bash(do touch \"c:/projetos/ia-labtracker-exam-agent/$d/__init__.py\")",
       "Bash(done)",
-      "Bash(python -m pytest tests/ -v)"
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(.venv/Scripts/pip install -r requirements.txt)",
+      "Bash(.venv/Scripts/python -m uvicorn src.main:app --reload --port 8000)",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(.venv/Scripts/pip install python-multipart)",
+      "Bash(curl -s -X POST http://localhost:8000/reconcile -F \"file=@C:/Users/Patrick/Downloads/Manchesters.xlsx\" -o test_output.xlsx -w \"%{http_code}\")",
+      "Bash(nslookup db.qtclqefjrxfrazygwixs.supabase.co)",
+      "Bash(.venv/Scripts/python.exe -c \":*)",
+      "Bash(ping -4 db.qtclqefjrxfrazygwixs.supabase.co -n 1)",
+      "Bash(nslookup db.qtclqefjrxfrazygwixs.supabase.co 8.8.8.8)",
+      "Bash(taskkill //F //IM uvicorn.exe)",
+      "Bash(taskkill //F //FI \"WINDOWTITLE eq uvicorn*\")",
+      "Bash(pkill -f uvicorn)"
     ]
   }
 }
