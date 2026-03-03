@@ -116,16 +116,33 @@ async def ingest_stats(
 
 @app.post("/reconcile")
 async def reconcile(file: UploadFile = File(...)):
+    # incoming request should be multipart/form-data with a file field
+    logger.info("/reconcile called with file: %s", file.filename)
     db = get_db()
     embedder = get_embedder()
+
+    # persist upload to temporary XLSX file
     tmp_path = await _save_upload(file, ".xlsx")
+    logger.info("saved uploaded file to %s", tmp_path)
 
     try:
-        input_rows = read_excel(tmp_path)
+        # attempt to read input rows; if the workbook is invalid or doesn't
+        # contain the expected columns we convert the error into a 400
+        try:
+            input_rows = read_excel(tmp_path)
+        except Exception as exc:  # pandas or our ValueError
+            logger.exception("failed to read Excel input %s", tmp_path.name)
+            raise HTTPException(
+                status_code=400,
+                detail=f"could not parse excel file: {exc}",
+            )
+
         results = reconcile_all(input_rows, embedder, db)
+        logger.info("reconciliation produced %d rows", len(results))
 
         out_path = Path(tempfile.mktemp(suffix=".xlsx"))
         write_excel(results, out_path)
+        logger.info("wrote output workbook %s", out_path.name)
 
         def cleanup():
             out_path.unlink(missing_ok=True)
@@ -142,10 +159,39 @@ async def reconcile(file: UploadFile = File(...)):
 
 @app.on_event("startup")
 async def on_startup():
-    logger.info("Starting Exam Reconciler API")
+    # adjust logger level according to configuration so that tests or
+    # environments can override verbosity via LOG_LEVEL
     settings = get_settings()
+    level = settings.log_level.upper()
+    try:
+        logger.setLevel(level)
+        # also set root logger so that any third‑party libraries follow
+        import logging as _logging
+
+        _logging.getLogger().setLevel(level)
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("invalid log level '%s', falling back to INFO", level)
+
+    logger.info("Starting Exam Reconciler API")
     logger.info(
         "Embeddings provider: %s | DB: %s",
         settings.embeddings_provider,
         "supabase" if settings.use_supabase else "direct-postgres",
+    )
+
+
+# fastapi will raise a RequestValidationError when a required field is missing
+# (for example the multipart/form-data upload). we intercept the exception so
+# that the stack trace is emitted to our logger rather than dropped silently
+# inside uvicorn. the returned response is identical to the default.
+from fastapi.exceptions import RequestValidationError
+from fastapi import status
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    logger.error("request validation failed: %s", exc)
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": exc.errors()},
     )

@@ -92,7 +92,51 @@ Envia uma planilha Excel e recebe o ranking colorido de volta.
 | ------ | ---- | ----------- | ----------------------------- |
 | `file` | File | Sim         | Planilha `.xlsx` com questões |
 
+> **Importante:** o arquivo deve ser enviado como um **formulário multipart (`multipart/form-data`)**
+> com o campo `file`. Se você fizer a requisição com JSON ou apenas o caminho do
+> arquivo, o FastAPI retornará um erro 422 com a mensagem `Field required` na
+> chave `body.file`.
+>
+> Exemplo `curl`:
+>
+> ```bash
+> curl -F "file=@/caminho/para/questoes.xlsx" \
+>      http://localhost:8000/reconcile -o ranking.xlsx
+> ```
+
 **Resposta:** Download automático de `ranking_output.xlsx`
+
+### Logs e debugging
+
+O agente usa um logger nomeado `exam_reconciler` que, por padrão, propaga as
+mensagens para o logger raiz. A configuração inicial (`src/utils/logging.py`) já
+define `basicConfig` em nível `INFO`, mas o nível pode ser alterado via
+environment variable `LOG_LEVEL` (ex: `DEBUG`, `WARNING`, `ERROR`). O valor é
+lido em `src/config.py` e aplicado durante o evento de startup.
+
+Se estiver usando `uvicorn` você pode garantir que o nível de log seja alto o
+suficiente ao iniciar com:
+
+```bash
+uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload --log-level info
+```
+
+(note o `--log-level info`; sem ele apenas avisos/erros serão mostrados).
+
+Durante a execução de `/reconcile` você verá informações como:
+
+```
+2026-03-03 12:34:56 INFO exam_reconciler /reconcile called with file: provas.xlsx
+2026-03-03 12:34:56 INFO exam_reconciler saved uploaded file to /tmp/tmpabcd1234.xlsx
+2026-03-03 12:34:56 INFO exam_reconciler reading Excel: tmpabcd1234.xlsx
+2026-03-03 12:34:56 INFO exam_reconciler read 10 rows from tmpabcd1234.xlsx
+2026-03-03 12:34:57 INFO exam_reconciler reconciliation produced 10 rows
+2026-03-03 12:34:57 INFO exam_reconciler wrote output workbook tmpefgh5678.xlsx
+```
+
+Caso o arquivo não seja um `.xlsx` válido ou não contenha a coluna `tema`, o
+sistema lança um erro 400 com a mensagem explicando o problema, e a pilha de
+erro é logada.
 
 ## Usando com Insomnia
 
