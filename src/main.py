@@ -152,7 +152,7 @@ async def reconcile(file: UploadFile = File(...)):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_filename = f"ranking_output_{timestamp}.xlsx"
         out_path = project_root / out_filename
-        
+
         write_excel(results, out_path)
         logger.info(
             "[reconcile] wrote output workbook to project root: %s",

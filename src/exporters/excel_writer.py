@@ -4,7 +4,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import pandas as pd
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 
 from src.aggregator.consolidate import ReconciledRow
 from src.utils.logging import logger
@@ -17,11 +17,10 @@ FILL_MAP = {
 }
 
 WHITE_FONT = Font(color="FFFFFF", bold=True)
-BLACK_FONT = Font(color="000000")
+BLACK_FONT = Font(color="000000", bold=True)
 
 COLUMNS = [
     "input_tema",
-    "input_classificacao",
     "input_equivalencia",
     "normalized_tema",
     "normalized_subtema",
@@ -45,6 +44,8 @@ def write_excel(
     for r in rows:
         d = asdict(r)
         d["matched_ids"] = ",".join(str(i) for i in d["matched_ids"])
+        # Format num_questions: "N questões" with color name
+        d["num_questions"] = f"{d['num_questions']} questões"
         records.append(d)
 
     df = pd.DataFrame(records)
@@ -71,10 +72,12 @@ def _apply_color_formatting(path: Path, df: pd.DataFrame) -> None:
 
     wb = load_workbook(path)
     ws = wb.active
-    cor_hex_col = list(df.columns).index("cor_hex") + 1
+
+    cor_hex_col_idx = list(df.columns).index("cor_hex") + 1
+    num_questions_col_idx = list(df.columns).index("num_questions") + 1
 
     for row_idx in range(2, len(df) + 2):
-        hex_value = ws.cell(row=row_idx, column=cor_hex_col).value
+        hex_value = ws.cell(row=row_idx, column=cor_hex_col_idx).value
         if not hex_value:
             continue
 
@@ -84,9 +87,20 @@ def _apply_color_formatting(path: Path, df: pd.DataFrame) -> None:
 
         font = WHITE_FONT if hex_value in ("#EF4444", "#F97316") else BLACK_FONT
 
-        for col_idx in range(1, ws.max_column + 1):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            cell.fill = fill
-            cell.font = font
+        # Only color the num_questions cell
+        num_q_cell = ws.cell(row=row_idx, column=num_questions_col_idx)
+        num_q_cell.fill = fill
+        num_q_cell.font = font
+        num_q_cell.alignment = Alignment(horizontal="center")
+
+    # Auto-adjust column widths
+    for col_idx in range(1, ws.max_column + 1):
+        max_len = 0
+        col_letter = ws.cell(row=1, column=col_idx).column_letter
+        for row_idx in range(1, ws.max_row + 1):
+            val = ws.cell(row=row_idx, column=col_idx).value
+            if val:
+                max_len = max(max_len, len(str(val)))
+        ws.column_dimensions[col_letter].width = min(max_len + 2, 50)
 
     wb.save(path)

@@ -24,7 +24,7 @@ def test_reconcile_missing_file_returns_422(caplog):
     response = client.post("/reconcile", data={})
     assert response.status_code == 422
     # detail is returned in JSON but the error message will contain "field required"
-    assert "field required" in response.text
+    assert "field required" in response.text.lower()
 
 
 def test_reconcile_invalid_excel_returns_400(caplog, monkeypatch):

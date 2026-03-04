@@ -156,6 +156,55 @@ class DBClient:
             ).fetchone()
         return dict(row) if row else None
 
+    def find_best_theme_stat(
+        self, query: str, institution: str | None = None
+    ) -> dict | None:
+        """Search theme_stats using FTS for flexible matching.
+
+        Tries exact match first, then FTS, to find the best matching
+        theme_stat entry for a given query string.
+        """
+        # 1) Try exact tema match (with or without subtema via pipe)
+        if "|" in query:
+            parts = [p.strip() for p in query.split("|", 1)]
+            exact = self.get_theme_stat(parts[0], parts[1], institution)
+            if exact:
+                return exact
+
+        exact = self.get_theme_stat(query, None, institution)
+        if exact:
+            return exact
+
+        # 2) FTS search on theme_stats
+        base_query = (
+            "SELECT * FROM theme_stats "
+            "WHERE fts @@ plainto_tsquery('portuguese', %s)"
+        )
+        params: list = [query]
+        if institution:
+            base_query += " AND institution = %s"
+            params.append(institution)
+        base_query += " ORDER BY num_questions DESC LIMIT 1"
+
+        row = self.conn.execute(base_query, params).fetchone()
+        return dict(row) if row else None
+
+    def get_subtemas_for_tema(
+        self, tema: str, institution: str | None = None
+    ) -> list[dict]:
+        """Return all subtema-level entries for a given tema."""
+        query = (
+            "SELECT * FROM theme_stats "
+            "WHERE lower(tema) = lower(%s) AND subtema IS NOT NULL"
+        )
+        params: list = [tema]
+        if institution:
+            query += " AND institution = %s"
+            params.append(institution)
+        query += " ORDER BY num_questions DESC"
+        rows = self.conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
     def search_theme_stats_fts(self, query: str, limit: int = 10) -> list[dict]:
         rows = self.conn.execute(
             "SELECT * FROM theme_stats WHERE fts @@ plainto_tsquery('portuguese', %s) ORDER BY num_questions DESC LIMIT %s",

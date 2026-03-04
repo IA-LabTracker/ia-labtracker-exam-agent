@@ -18,7 +18,6 @@ W_SIM = 0.6
 @dataclass
 class ReconciledRow:
     input_tema: str
-    input_classificacao: str | None
     input_equivalencia: str | None
     normalized_tema: str
     normalized_subtema: str | None
@@ -31,13 +30,21 @@ class ReconciledRow:
     notes: str = ""
 
 
+def _build_equivalencia(stat: dict) -> str:
+    """Build 'tema | subtema' string from a theme_stats row."""
+    tema = stat.get("tema", "")
+    subtema = stat.get("subtema")
+    if subtema:
+        return f"{tema} | {subtema}"
+    return tema
+
+
 def reconcile_row(
     row: dict[str, Any],
     embedder: BaseEmbedder,
     db: DBClient,
 ) -> ReconciledRow:
     tema_raw = str(row.get("tema", ""))
-    classificacao = row.get("classificacao")
     equivalencia = row.get("equivalencia")
     logger.debug("[reconcile_row] processing tema='%s'", tema_raw[:50])
 
@@ -48,6 +55,7 @@ def reconcile_row(
         norm_subtema[:50] if norm_subtema else "(none)",
     )
 
+    # Build search query combining tema + subtema + equivalencia
     query = norm_tema
     if norm_subtema:
         query += f" {norm_subtema}"
@@ -59,12 +67,13 @@ def reconcile_row(
     logger.debug("[reconcile_row] found %d candidates", len(candidates))
 
     matched_ids = [c.id for c in candidates]
-    num_questions = len(candidates)
+    num_candidates = len(candidates)
     avg_sim = (
         sum(c.similarity for c in candidates) / len(candidates) if candidates else 0.0
     )
     best_candidate = candidates[0] if candidates else None
 
+    # Start with candidate-derived normalized fields
     final_tema = (
         best_candidate.tema_normalized or norm_tema if best_candidate else norm_tema
     )
@@ -74,29 +83,73 @@ def reconcile_row(
         else norm_subtema
     )
 
-    priority = W_FREQ * num_questions + W_SIM * avg_sim
+    priority = W_FREQ * num_candidates + W_SIM * avg_sim
 
+    # --- Theme stats lookup (flexible: exact → FTS) ---
     stat = db.get_theme_stat(final_tema, final_subtema)
+    if not stat:
+        stat = db.find_best_theme_stat(tema_raw)
+    if not stat:
+        stat = db.find_best_theme_stat(norm_tema)
+
+    notes_parts = []
+    equivalencia_out = equivalencia  # default: keep input equivalencia
+
     if stat:
         cor = stat["cor"]
         cor_hex = stat["cor_hex"]
-        db_questions = stat["num_questions"]
-        if db_questions > num_questions:
-            num_questions = db_questions
-    else:
-        cor, cor_hex = classify_color(num_questions)
+        num_questions = stat["num_questions"]
 
-    notes_parts = []
-    if not candidates:
+        # Use theme_stats data for normalized fields when candidates
+        # didn't provide them (e.g. empty questions table)
+        stat_tema = stat.get("tema", "")
+        stat_subtema = stat.get("subtema")
+        if stat_tema:
+            final_tema = stat_tema
+        if stat_subtema:
+            final_subtema = stat_subtema
+
+        # Build equivalencia from matched theme_stat
+        equivalencia_out = _build_equivalencia(stat)
+
+        # Get related subtemas to enrich notes
+        subtemas = db.get_subtemas_for_tema(stat["tema"])
+        if subtemas:
+            subtema_names = [s["subtema"] for s in subtemas if s.get("subtema")]
+            if subtema_names:
+                notes_parts.append(
+                    f"Subtemas: {' | '.join(subtema_names)}"
+                )
+
+        notes_parts.append(
+            f"Fonte: {stat.get('institution', 'N/A')} "
+            f"(ranking #{stat.get('ranking', '?')})"
+        )
+        logger.debug(
+            "[reconcile_row] theme_stat match: tema='%s' subtema='%s' cor=%s num=%d",
+            stat.get("tema"),
+            stat.get("subtema"),
+            cor,
+            num_questions,
+        )
+    else:
+        num_questions = num_candidates
+        cor, cor_hex = classify_color(num_questions)
         notes_parts.append("No matches found in DB")
-    if classificacao:
-        notes_parts.append(f"classificacao={classificacao}")
+
+    if not candidates:
+        notes_parts.append("No matches found in questions DB")
+    elif best_candidate:
+        notes_parts.append(
+            f"Best match: {best_candidate.tema_normalized or '?'}"
+            f" (sim={best_candidate.similarity:.2f})"
+        )
+
     notes = "; ".join(notes_parts)
 
     return ReconciledRow(
         input_tema=tema_raw,
-        input_classificacao=str(classificacao) if classificacao else None,
-        input_equivalencia=str(equivalencia) if equivalencia else None,
+        input_equivalencia=equivalencia_out,
         normalized_tema=final_tema,
         normalized_subtema=final_subtema,
         similarity=round(avg_sim, 4),
