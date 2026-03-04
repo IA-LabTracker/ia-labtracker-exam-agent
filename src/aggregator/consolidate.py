@@ -55,7 +55,6 @@ def reconcile_row(
         norm_subtema[:50] if norm_subtema else "(none)",
     )
 
-    # Build search query combining tema + subtema + equivalencia
     query = norm_tema
     if norm_subtema:
         query += f" {norm_subtema}"
@@ -73,7 +72,6 @@ def reconcile_row(
     )
     best_candidate = candidates[0] if candidates else None
 
-    # Start with candidate-derived normalized fields
     final_tema = (
         best_candidate.tema_normalized or norm_tema if best_candidate else norm_tema
     )
@@ -85,7 +83,6 @@ def reconcile_row(
 
     priority = W_FREQ * num_candidates + W_SIM * avg_sim
 
-    # --- Theme stats lookup (flexible: exact → FTS) ---
     stat = db.get_theme_stat(final_tema, final_subtema)
     if not stat:
         stat = db.find_best_theme_stat(tema_raw)
@@ -93,15 +90,13 @@ def reconcile_row(
         stat = db.find_best_theme_stat(norm_tema)
 
     notes_parts = []
-    equivalencia_out = equivalencia  # default: keep input equivalencia
+    equivalencia_out = equivalencia
 
     if stat:
         cor = stat["cor"]
         cor_hex = stat["cor_hex"]
         num_questions = stat["num_questions"]
 
-        # Use theme_stats data for normalized fields when candidates
-        # didn't provide them (e.g. empty questions table)
         stat_tema = stat.get("tema", "")
         stat_subtema = stat.get("subtema")
         if stat_tema:
@@ -109,10 +104,8 @@ def reconcile_row(
         if stat_subtema:
             final_subtema = stat_subtema
 
-        # Build equivalencia from matched theme_stat
         equivalencia_out = _build_equivalencia(stat)
 
-        # Get related subtemas to enrich notes
         subtemas = db.get_subtemas_for_tema(stat["tema"])
         if subtemas:
             subtema_names = [s["subtema"] for s in subtemas if s.get("subtema")]

@@ -44,7 +44,6 @@ def write_excel(
     for r in rows:
         d = asdict(r)
         d["matched_ids"] = ",".join(str(i) for i in d["matched_ids"])
-        # Format num_questions: "N questões" with color name
         d["num_questions"] = f"{d['num_questions']} questões"
         records.append(d)
 
@@ -87,13 +86,11 @@ def _apply_color_formatting(path: Path, df: pd.DataFrame) -> None:
 
         font = WHITE_FONT if hex_value in ("#EF4444", "#F97316") else BLACK_FONT
 
-        # Only color the num_questions cell
         num_q_cell = ws.cell(row=row_idx, column=num_questions_col_idx)
         num_q_cell.fill = fill
         num_q_cell.font = font
         num_q_cell.alignment = Alignment(horizontal="center")
 
-    # Auto-adjust column widths
     for col_idx in range(1, ws.max_column + 1):
         max_len = 0
         col_letter = ws.cell(row=1, column=col_idx).column_letter

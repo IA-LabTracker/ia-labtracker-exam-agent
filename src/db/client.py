@@ -164,7 +164,6 @@ class DBClient:
         Tries exact match first, then FTS, to find the best matching
         theme_stat entry for a given query string.
         """
-        # 1) Try exact tema match (with or without subtema via pipe)
         if "|" in query:
             parts = [p.strip() for p in query.split("|", 1)]
             exact = self.get_theme_stat(parts[0], parts[1], institution)
@@ -175,7 +174,6 @@ class DBClient:
         if exact:
             return exact
 
-        # 2) FTS search on theme_stats
         base_query = (
             "SELECT * FROM theme_stats "
             "WHERE fts @@ plainto_tsquery('portuguese', %s)"

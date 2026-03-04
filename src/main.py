@@ -118,23 +118,19 @@ async def ingest_stats(
 
 @app.post("/reconcile")
 async def reconcile(file: UploadFile = File(...)):
-    # incoming request should be multipart/form-data with a file field
     logger.info("/reconcile called with file: %s", file.filename)
     db = get_db()
     embedder = get_embedder()
 
-    # persist upload to temporary XLSX file
     tmp_path = await _save_upload(file, ".xlsx")
     logger.info("saved uploaded file to %s", tmp_path)
 
     try:
-        # attempt to read input rows; if the workbook is invalid or doesn't
-        # contain the expected columns we convert the error into a 400
         try:
             logger.info("[reconcile] attempting to read Excel from %s", tmp_path.name)
             input_rows = read_excel(tmp_path)
             logger.info("[reconcile] successfully parsed %d rows", len(input_rows))
-        except Exception as exc:  # pandas or our ValueError
+        except Exception as exc:
             logger.exception("[reconcile] failed to read Excel input %s", tmp_path.name)
             raise HTTPException(
                 status_code=400,
@@ -147,7 +143,6 @@ async def reconcile(file: UploadFile = File(...)):
             "[reconcile] reconciliation complete: %d rows produced", len(results)
         )
 
-        # save output to project root with timestamp
         project_root = Path(__file__).parent.parent
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_filename = f"ranking_output_{timestamp}.xlsx"
@@ -159,7 +154,6 @@ async def reconcile(file: UploadFile = File(...)):
             out_path.absolute(),
         )
 
-        # return file for download AND save locally
         return FileResponse(
             path=str(out_path),
             filename=out_filename,
@@ -171,17 +165,14 @@ async def reconcile(file: UploadFile = File(...)):
 
 @app.on_event("startup")
 async def on_startup():
-    # adjust logger level according to configuration so that tests or
-    # environments can override verbosity via LOG_LEVEL
     settings = get_settings()
     level = settings.log_level.upper()
     try:
         logger.setLevel(level)
-        # also set root logger so that any third‑party libraries follow
         import logging as _logging
 
         _logging.getLogger().setLevel(level)
-    except Exception:  # pragma: no cover - defensive
+    except Exception:
         logger.warning("invalid log level '%s', falling back to INFO", level)
 
     logger.info("Starting Exam Reconciler API")
@@ -192,10 +183,6 @@ async def on_startup():
     )
 
 
-# fastapi will raise a RequestValidationError when a required field is missing
-# (for example the multipart/form-data upload). we intercept the exception so
-# that the stack trace is emitted to our logger rather than dropped silently
-# inside uvicorn. the returned response is identical to the default.
 from fastapi.exceptions import RequestValidationError
 from fastapi import status
 
@@ -217,7 +204,6 @@ async def validation_exception_handler(request, exc):
     )
 
 
-# middleware to log all incoming requests
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         method = request.method

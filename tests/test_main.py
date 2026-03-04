@@ -23,12 +23,10 @@ def test_reconcile_missing_file_returns_422(caplog):
     caplog.set_level(logging.ERROR)
     response = client.post("/reconcile", data={})
     assert response.status_code == 422
-    # detail is returned in JSON but the error message will contain "field required"
     assert "field required" in response.text.lower()
 
 
 def test_reconcile_invalid_excel_returns_400(caplog, monkeypatch):
-    # create a workbook without the required "tema" column
     df = pd.DataFrame({"foo": [1, 2, 3]})
     buf = _make_excel(df)
     files = {
@@ -39,7 +37,6 @@ def test_reconcile_invalid_excel_returns_400(caplog, monkeypatch):
         )
     }
     caplog.set_level(logging.INFO)
-    # perform request; the handler should catch pandas/ValueError and convert
     resp = client.post("/reconcile", files=files)
     assert resp.status_code == 400
     assert "could not parse excel" in resp.json()["detail"].lower()
@@ -47,7 +44,6 @@ def test_reconcile_invalid_excel_returns_400(caplog, monkeypatch):
 
 
 def test_reconcile_valid_file_success(caplog, monkeypatch):
-    # patch reconcile_all so we don't need a real DB/embedder
     monkeypatch.setattr("src.main.reconcile_all", lambda rows, emb, db: [])
 
     df = pd.DataFrame({"tema": ["A", "B"]})

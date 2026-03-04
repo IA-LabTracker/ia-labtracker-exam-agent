@@ -98,7 +98,6 @@ class TestReconcileRow:
         assert result.cor_hex == "#EF4444"
         assert result.num_questions == 9
         assert result.input_equivalencia == "Trauma | Abordagem inicial"
-        # normalized fields come from theme_stat
         assert result.normalized_tema == "Trauma"
         assert result.normalized_subtema == "Abordagem inicial"
 
