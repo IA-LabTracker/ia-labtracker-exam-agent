@@ -39,10 +39,19 @@ def reconcile_row(
     db: DBClient,
 ) -> ReconciledRow:
     tema_raw = str(row.get("tema", ""))
+    subtema_raw = row.get("subtema")
+    if subtema_raw and str(subtema_raw).strip() and str(subtema_raw).strip().lower() != "nan":
+        subtema_raw = str(subtema_raw).strip()
+    else:
+        subtema_raw = None
     equivalencia = row.get("equivalencia")
-    logger.debug("[reconcile_row] processing tema='%s'", tema_raw[:50])
+    logger.debug(
+        "[reconcile_row] processing tema='%s' subtema='%s'",
+        tema_raw[:50],
+        (subtema_raw or "")[:50],
+    )
 
-    norm_tema, norm_subtema = normalize_tema_subtema(tema_raw)
+    norm_tema, norm_subtema = normalize_tema_subtema(tema_raw, subtema_raw)
     logger.debug(
         "[reconcile_row] normalized: tema='%s' subtema='%s'",
         norm_tema[:50],
@@ -72,6 +81,10 @@ def reconcile_row(
     )
 
     stat = db.get_theme_stat(final_tema, final_subtema)
+    if not stat and norm_subtema:
+        stat = db.get_theme_stat(norm_tema, norm_subtema)
+    if not stat and subtema_raw:
+        stat = db.find_best_theme_stat(f"{tema_raw} | {subtema_raw}")
     if not stat:
         stat = db.find_best_theme_stat(tema_raw)
     if not stat:
@@ -81,8 +94,8 @@ def reconcile_row(
     equivalencia_out = equivalencia
 
     if stat:
-        cor_hex = stat["cor_hex"]
         num_questions = stat["num_questions"]
+        _, cor_hex = classify_color(num_questions)
 
         stat_tema = stat.get("tema", "")
         stat_subtema = stat.get("subtema")
@@ -126,8 +139,10 @@ def reconcile_row(
 
     notes = "; ".join(notes_parts)
 
+    input_display = f"{tema_raw} | {subtema_raw}" if subtema_raw else tema_raw
+
     return ReconciledRow(
-        input_tema=tema_raw,
+        input_tema=input_display,
         input_equivalencia=equivalencia_out,
         normalized_tema=final_tema,
         normalized_subtema=final_subtema,
@@ -135,6 +150,13 @@ def reconcile_row(
         cor_hex=cor_hex,
         notes=notes,
     )
+
+
+def _dedup_key(row: ReconciledRow) -> str:
+    """Build a deduplication key from normalized tema + subtema."""
+    tema = (row.normalized_tema or "").strip().lower()
+    subtema = (row.normalized_subtema or "").strip().lower()
+    return f"{tema}||{subtema}"
 
 
 def reconcile_all(
@@ -162,8 +184,22 @@ def reconcile_all(
             )
             raise
 
-    results.sort(key=lambda r: r.num_questions, reverse=True)
+    seen: dict[str, ReconciledRow] = {}
+    for r in results:
+        key = _dedup_key(r)
+        if key not in seen or r.num_questions > seen[key].num_questions:
+            seen[key] = r
+    deduped = list(seen.values())
+
+    if len(deduped) < len(results):
+        logger.info(
+            "[reconcile_all] deduplicated %d -> %d rows",
+            len(results),
+            len(deduped),
+        )
+
+    deduped.sort(key=lambda r: r.num_questions, reverse=True)
     logger.info(
-        "[reconcile_all] reconciliation complete: %d rows produced", len(results)
+        "[reconcile_all] reconciliation complete: %d rows produced", len(deduped)
     )
-    return results
+    return deduped

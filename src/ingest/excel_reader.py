@@ -21,6 +21,10 @@ _COLUMN_MAP: dict[str, str] = {
     "num_questions": "num_questoes",
     "questoes": "num_questoes",
     "questões": "num_questoes",
+    "subtema": "subtema",
+    "sub_tema": "subtema",
+    "subtheme": "subtema",
+    "sub-tema": "subtema",
 }
 
 
@@ -49,7 +53,7 @@ def read_excel(path: str | Path) -> list[dict[str, Any]]:
             f"Found columns: {list(df.columns)}"
         )
 
-    for col in ("classificacao", "equivalencia", "num_questoes"):
+    for col in ("classificacao", "equivalencia", "num_questoes", "subtema"):
         if col not in df.columns:
             logger.debug("[read_excel] column '%s' not found, adding as None", col)
             df[col] = None

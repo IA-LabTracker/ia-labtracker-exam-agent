@@ -35,10 +35,10 @@ SYNONYMS: dict[str, str] = {
 }
 
 COLOR_THRESHOLDS = [
-    (6, "vermelho", "#EF4444"),
-    (4, "laranja", "#F97316"),
-    (2, "amarelo", "#EAB308"),
-    (0, "verde", "#22C55E"),
+    (7, "vermelho", "#EF4444"),
+    (5, "laranja", "#F97316"),
+    (3, "verde", "#22C55E"),
+    (0, "azul", "#3B82F6"),
 ]
 
 
@@ -84,4 +84,4 @@ def classify_color(num_questions: int) -> tuple[str, str]:
     for threshold, cor, cor_hex in COLOR_THRESHOLDS:
         if num_questions >= threshold:
             return cor, cor_hex
-    return "verde", "#22C55E"
+    return "azul", "#3B82F6"
