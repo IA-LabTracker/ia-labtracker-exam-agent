@@ -209,3 +209,48 @@ class DBClient:
             (query, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- theme_stats embeddings -------------------------------------------------
+
+    def get_theme_stats_without_embeddings(self) -> list[dict]:
+        return list(
+            self.conn.execute(
+                "SELECT id, tema, subtema FROM theme_stats WHERE embedding IS NULL"
+            ).fetchall()
+        )
+
+    def update_theme_stat_embedding(self, stat_id: int, embedding: list[float]) -> None:
+        self.conn.execute(
+            "UPDATE theme_stats SET embedding = %s::vector WHERE id = %s",
+            (str(embedding), stat_id),
+        )
+
+    def semantic_search_theme_stats(
+        self,
+        query_embedding: list[float],
+        query_text: str,
+        top_k: int = 5,
+        alpha: float = 0.7,
+        beta: float = 0.3,
+    ) -> list[dict]:
+        logger.debug(
+            "[semantic_search_theme_stats] query_text='%s' top_k=%d",
+            query_text[:100],
+            top_k,
+        )
+        try:
+            rows = self.conn.execute(
+                "SELECT * FROM semantic_search_theme_stats(%s::vector, %s, %s, %s, %s)",
+                (str(query_embedding), query_text, top_k, alpha, beta),
+            ).fetchall()
+            logger.debug("[semantic_search_theme_stats] returned %d rows", len(rows))
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.error("[semantic_search_theme_stats] error: %s", exc, exc_info=True)
+            return []
+
+    def get_all_theme_stats(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM theme_stats ORDER BY num_questions DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]

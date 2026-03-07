@@ -17,7 +17,8 @@
       "Bash(taskkill //F //IM uvicorn.exe)",
       "Bash(taskkill //F //FI \"WINDOWTITLE eq uvicorn*\")",
       "Bash(pkill -f uvicorn)",
-      "Bash(.venv/Scripts/python.exe -m pytest tests/ -v)"
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -v)",
+      "Bash(xargs wc -l)"
     ]
   }
 }

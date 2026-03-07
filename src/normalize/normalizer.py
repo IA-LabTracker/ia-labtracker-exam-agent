@@ -35,9 +35,10 @@ SYNONYMS: dict[str, str] = {
 }
 
 COLOR_THRESHOLDS = [
-    (7, "vermelho", "#EF4444"),
-    (5, "laranja", "#F97316"),
-    (3, "verde", "#22C55E"),
+    (6, "vermelho", "#EF4444"),
+    (4, "laranja", "#F97316"),
+    (2, "amarelo", "#EAB308"),
+    (1, "verde", "#22C55E"),
     (0, "azul", "#3B82F6"),
 ]
 

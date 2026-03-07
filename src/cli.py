@@ -27,7 +27,9 @@ def cmd_ingest_pdf(args: argparse.Namespace) -> None:
         logger.info("File already ingested, skipping: %s", args.file)
         return
 
-    questions = extract_questions(args.file, institution=args.institution, year=args.year)
+    questions = extract_questions(
+        args.file, institution=args.institution, year=args.year
+    )
     count = db.upsert_questions(questions)
 
     pending = db.get_questions_without_embeddings()
@@ -47,9 +49,11 @@ def cmd_ingest_pdf(args: argparse.Namespace) -> None:
 
 def cmd_ingest_stats(args: argparse.Namespace) -> None:
     from src.db.client import DBClient
+    from src.embeddings.embedder import Embedder
     from src.ingest.pdf_parser import extract_theme_stats, file_hash
 
     db = DBClient().connect()
+    embedder = Embedder.create()
 
     fhash = file_hash(args.file)
     if db.file_already_ingested(fhash):
@@ -59,13 +63,26 @@ def cmd_ingest_stats(args: argparse.Namespace) -> None:
     stats = extract_theme_stats(args.file, institution=args.institution)
     count = db.upsert_theme_stats(stats)
 
+    _generate_theme_stats_embeddings(db, embedder)
+
     db.record_ingest(args.file, fhash, count)
     db.close()
     logger.info("Ingested %d theme stats from %s", count, args.file)
 
 
+def _generate_theme_stats_embeddings(db, embedder) -> None:
+    pending = db.get_theme_stats_without_embeddings()
+    if not pending:
+        return
+    texts = [f"{s['tema']} {s['subtema'] or ''}" for s in pending]
+    embeddings = embedder.embed_batch(texts)
+    for s, emb in zip(pending, embeddings):
+        db.update_theme_stat_embedding(s["id"], emb)
+    logger.info("Generated embeddings for %d theme_stats entries", len(pending))
+
+
 def cmd_reconcile(args: argparse.Namespace) -> None:
-    from src.aggregator.consolidate import reconcile_all
+    from src.aggregator.consolidate import reconcile_all, reverse_coverage
     from src.db.client import DBClient
     from src.embeddings.embedder import Embedder
     from src.exporters.excel_writer import write_excel
@@ -74,9 +91,13 @@ def cmd_reconcile(args: argparse.Namespace) -> None:
     db = DBClient().connect()
     embedder = Embedder.create()
 
+    # Ensure theme_stats have embeddings
+    _generate_theme_stats_embeddings(db, embedder)
+
     input_rows = read_excel(args.input)
     results = reconcile_all(input_rows, embedder, db)
-    write_excel(results, args.output, also_csv=args.csv)
+    reverse_rows = reverse_coverage(input_rows, embedder, db)
+    write_excel(results, args.output, also_csv=args.csv, reverse_rows=reverse_rows)
 
     db.close()
     logger.info("Output written to %s", args.output)

@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from src.aggregator.consolidate import reconcile_all
+from src.aggregator.consolidate import reconcile_all, reverse_coverage
 from src.config import get_settings
 from src.db.client import DBClient
 from src.embeddings.embedder import Embedder
@@ -98,6 +98,7 @@ async def ingest_stats(
     institution: str = "unknown",
 ):
     db = get_db()
+    embedder = get_embedder()
     tmp_path = await _save_upload(file, ".pdf")
 
     try:
@@ -109,11 +110,25 @@ async def ingest_stats(
 
         stats = extract_theme_stats(tmp_path, institution=institution)
         count = db.upsert_theme_stats(stats)
+
+        _ensure_theme_stats_embeddings(db, embedder)
+
         db.record_ingest(file.filename or "stats.pdf", fhash, count)
 
         return {"message": "Theme stats ingested", "stats_added": count}
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+def _ensure_theme_stats_embeddings(db: DBClient, embedder) -> None:
+    pending = db.get_theme_stats_without_embeddings()
+    if not pending:
+        return
+    texts = [f"{s['tema']} {s['subtema'] or ''}" for s in pending]
+    embeddings = embedder.embed_batch(texts)
+    for s, emb in zip(pending, embeddings):
+        db.update_theme_stat_embedding(s["id"], emb)
+    logger.info("Generated embeddings for %d theme_stats entries", len(pending))
 
 
 @app.post("/reconcile")
@@ -137,10 +152,19 @@ async def reconcile(file: UploadFile = File(...)):
                 detail=f"could not parse excel file: {exc}",
             )
 
+        # Ensure theme_stats have embeddings
+        _ensure_theme_stats_embeddings(db, embedder)
+
         logger.info("[reconcile] starting reconciliation pipeline...")
         results = reconcile_all(input_rows, embedder, db)
         logger.info(
             "[reconcile] reconciliation complete: %d rows produced", len(results)
+        )
+
+        logger.info("[reconcile] starting reverse coverage analysis...")
+        reverse_rows = reverse_coverage(input_rows, embedder, db)
+        logger.info(
+            "[reconcile] reverse coverage: %d rows produced", len(reverse_rows)
         )
 
         project_root = Path(__file__).parent.parent
@@ -148,7 +172,7 @@ async def reconcile(file: UploadFile = File(...)):
         out_filename = f"ranking_output_{timestamp}.xlsx"
         out_path = project_root / out_filename
 
-        write_excel(results, out_path)
+        write_excel(results, out_path, reverse_rows=reverse_rows)
         logger.info(
             "[reconcile] wrote output workbook to project root: %s",
             out_path.absolute(),
