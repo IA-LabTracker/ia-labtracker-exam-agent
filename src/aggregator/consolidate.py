@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from src.normalize.normalizer import classify_color, normalize_tema_subtema
@@ -11,8 +11,6 @@ if TYPE_CHECKING:
     from src.db.client import DBClient
     from src.embeddings.embedder import BaseEmbedder
 
-W_FREQ = 0.4
-W_SIM = 0.6
 
 
 @dataclass
@@ -21,12 +19,8 @@ class ReconciledRow:
     input_equivalencia: str | None
     normalized_tema: str
     normalized_subtema: str | None
-    similarity: float
     num_questions: int
-    cor: str = "verde"
     cor_hex: str = "#22C55E"
-    matched_ids: list[int] = field(default_factory=list)
-    priority_score: float = 0.0
     notes: str = ""
 
 
@@ -65,11 +59,7 @@ def reconcile_row(
     candidates: list[Candidate] = retrieve_candidates(query, embedder, db)
     logger.debug("[reconcile_row] found %d candidates", len(candidates))
 
-    matched_ids = [c.id for c in candidates]
     num_candidates = len(candidates)
-    avg_sim = (
-        sum(c.similarity for c in candidates) / len(candidates) if candidates else 0.0
-    )
     best_candidate = candidates[0] if candidates else None
 
     final_tema = (
@@ -81,8 +71,6 @@ def reconcile_row(
         else norm_subtema
     )
 
-    priority = W_FREQ * num_candidates + W_SIM * avg_sim
-
     stat = db.get_theme_stat(final_tema, final_subtema)
     if not stat:
         stat = db.find_best_theme_stat(tema_raw)
@@ -93,7 +81,6 @@ def reconcile_row(
     equivalencia_out = equivalencia
 
     if stat:
-        cor = stat["cor"]
         cor_hex = stat["cor_hex"]
         num_questions = stat["num_questions"]
 
@@ -119,15 +106,14 @@ def reconcile_row(
             f"(ranking #{stat.get('ranking', '?')})"
         )
         logger.debug(
-            "[reconcile_row] theme_stat match: tema='%s' subtema='%s' cor=%s num=%d",
+            "[reconcile_row] theme_stat match: tema='%s' subtema='%s' num=%d",
             stat.get("tema"),
             stat.get("subtema"),
-            cor,
             num_questions,
         )
     else:
         num_questions = num_candidates
-        cor, cor_hex = classify_color(num_questions)
+        _, cor_hex = classify_color(num_questions)
         notes_parts.append("No matches found in DB")
 
     if not candidates:
@@ -145,12 +131,8 @@ def reconcile_row(
         input_equivalencia=equivalencia_out,
         normalized_tema=final_tema,
         normalized_subtema=final_subtema,
-        similarity=round(avg_sim, 4),
         num_questions=num_questions,
-        cor=cor,
         cor_hex=cor_hex,
-        matched_ids=matched_ids,
-        priority_score=round(priority, 4),
         notes=notes,
     )
 
@@ -180,7 +162,7 @@ def reconcile_all(
             )
             raise
 
-    results.sort(key=lambda r: r.priority_score, reverse=True)
+    results.sort(key=lambda r: r.num_questions, reverse=True)
     logger.info(
         "[reconcile_all] reconciliation complete: %d rows produced", len(results)
     )

@@ -24,12 +24,7 @@ COLUMNS = [
     "input_equivalencia",
     "normalized_tema",
     "normalized_subtema",
-    "similarity",
     "num_questions",
-    "cor",
-    "cor_hex",
-    "matched_ids",
-    "priority_score",
     "notes",
 ]
 
@@ -41,9 +36,10 @@ def write_excel(
 ) -> Path:
     output_path = Path(output_path)
     records = []
+    cor_hex_list = []
     for r in rows:
         d = asdict(r)
-        d["matched_ids"] = ",".join(str(i) for i in d["matched_ids"])
+        cor_hex_list.append(d.pop("cor_hex", "#22C55E"))
         d["num_questions"] = f"{d['num_questions']} questões"
         records.append(d)
 
@@ -51,7 +47,7 @@ def write_excel(
     df = df[[c for c in COLUMNS if c in df.columns]]
     df.to_excel(output_path, index=False, engine="openpyxl")
 
-    _apply_color_formatting(output_path, df)
+    _apply_color_formatting(output_path, df, cor_hex_list)
 
     logger.info("Wrote %d rows to %s", len(df), output_path)
 
@@ -63,20 +59,19 @@ def write_excel(
     return output_path
 
 
-def _apply_color_formatting(path: Path, df: pd.DataFrame) -> None:
+def _apply_color_formatting(path: Path, df: pd.DataFrame, cor_hex_list: list[str]) -> None:
     from openpyxl import load_workbook
 
-    if "cor_hex" not in df.columns:
+    if "num_questions" not in df.columns:
         return
 
     wb = load_workbook(path)
     ws = wb.active
 
-    cor_hex_col_idx = list(df.columns).index("cor_hex") + 1
     num_questions_col_idx = list(df.columns).index("num_questions") + 1
 
     for row_idx in range(2, len(df) + 2):
-        hex_value = ws.cell(row=row_idx, column=cor_hex_col_idx).value
+        hex_value = cor_hex_list[row_idx - 2] if (row_idx - 2) < len(cor_hex_list) else None
         if not hex_value:
             continue
 

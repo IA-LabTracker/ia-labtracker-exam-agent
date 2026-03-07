@@ -16,7 +16,8 @@
       "Bash(nslookup db.qtclqefjrxfrazygwixs.supabase.co 8.8.8.8)",
       "Bash(taskkill //F //IM uvicorn.exe)",
       "Bash(taskkill //F //FI \"WINDOWTITLE eq uvicorn*\")",
-      "Bash(pkill -f uvicorn)"
+      "Bash(pkill -f uvicorn)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -v)"
     ]
   }
 }
