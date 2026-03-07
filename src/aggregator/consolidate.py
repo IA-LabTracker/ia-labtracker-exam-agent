@@ -116,7 +116,7 @@ def reconcile_row(
         _, cor_hex = classify_color(num_questions)
         notes_parts.append("No matches found in DB")
 
-    if not candidates:
+    if not candidates and not stat:
         notes_parts.append("No matches found in questions DB")
     elif best_candidate:
         notes_parts.append(
