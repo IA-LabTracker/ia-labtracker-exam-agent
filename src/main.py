@@ -162,7 +162,7 @@ async def reconcile(file: UploadFile = File(...)):
         )
 
         logger.info("[reconcile] starting reverse coverage analysis...")
-        reverse_rows = reverse_coverage(input_rows, embedder, db)
+        reverse_rows = reverse_coverage(results, embedder, db)
         logger.info(
             "[reconcile] reverse coverage: %d rows produced", len(reverse_rows)
         )

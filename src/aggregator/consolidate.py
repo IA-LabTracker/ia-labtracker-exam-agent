@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
+
 from src.normalize.normalizer import classify_color, normalize_tema_subtema
 from src.retriever.hybrid_retriever import Candidate, retrieve_candidates
 from src.utils.logging import logger
@@ -126,9 +128,13 @@ def _resolve_tema(
             fts_score = 0.80 - (i * 0.10)
             logger.debug(
                 "[_resolve_tema] FTS match for tema='%s' (query='%s' score=%.2f)",
-                resolved, q[:50], fts_score,
+                resolved,
+                q[:50],
+                fts_score,
             )
-            info = MatchInfo(MATCH_FTS, fts_score, _classify_temperature(MATCH_FTS, fts_score))
+            info = MatchInfo(
+                MATCH_FTS, fts_score, _classify_temperature(MATCH_FTS, fts_score)
+            )
             return resolved, info
 
     # Semantic fallback — use embeddings on theme_stats
@@ -142,7 +148,9 @@ def _resolve_tema(
                 search_text[:50],
                 score,
             )
-            info = MatchInfo(MATCH_SEMANTIC, score, _classify_temperature(MATCH_SEMANTIC, score))
+            info = MatchInfo(
+                MATCH_SEMANTIC, score, _classify_temperature(MATCH_SEMANTIC, score)
+            )
             return resolved, info
 
     logger.debug("[_resolve_tema] no match found for tema_raw='%s'", tema_raw[:50])
@@ -204,7 +212,9 @@ def _single_semantic_search(
         if score > 0:
             logger.debug(
                 "[_single_semantic_search] tema='%s' score=%.3f query='%s'",
-                best["tema"], score, query[:50],
+                best["tema"],
+                score,
+                query[:50],
             )
             return best["tema"], score
     return None, 0.0
@@ -216,11 +226,11 @@ def _single_semantic_search(
 
 
 def _find_stat_tema_only(resolved_tema: str, db: DBClient) -> tuple[dict | None, int]:
-    """For tema-only input: find the best tema-level stat.
+    """For tema-only input: find the tema-level stat.
 
-    Prefers a proper tema-level row (subtema IS NULL). If only subtema-level
-    rows exist, returns the one with the most questions BUT aggregates the
-    total num_questions across all subtemas.
+    Only returns tema-level rows (subtema IS NULL).
+    If only subtema-level rows exist, aggregates their num_questions
+    but returns the tema name (not a subtema entry).
 
     Returns (stat, num_questions).
     """
@@ -228,11 +238,19 @@ def _find_stat_tema_only(resolved_tema: str, db: DBClient) -> tuple[dict | None,
     if stat:
         return stat, stat["num_questions"]
 
+    # No tema-level row — aggregate subtemas count but don't
+    # return a subtema entry (tema input must match tema level)
     subtemas = db.get_subtemas_for_tema(resolved_tema)
     if subtemas:
         total = sum(s.get("num_questions", 0) for s in subtemas)
-        best = max(subtemas, key=lambda s: s.get("num_questions", 0))
-        return best, total
+        # Build a synthetic tema-level stat
+        synthetic = {
+            **subtemas[0],
+            "subtema": None,
+            "category": "tema",
+            "num_questions": total,
+        }
+        return synthetic, total
 
     return None, 0
 
@@ -266,7 +284,9 @@ def _find_stat_with_subtema(
         if stat:
             # If tema was exact and subtema is exact → best possible
             if base.method == MATCH_EXACT:
-                info = MatchInfo(MATCH_EXACT, 1.0, _classify_temperature(MATCH_EXACT, 1.0))
+                info = MatchInfo(
+                    MATCH_EXACT, 1.0, _classify_temperature(MATCH_EXACT, 1.0)
+                )
             else:
                 info = MatchInfo(base.method, base.score, base.label)
             return stat, info
@@ -284,44 +304,55 @@ def _find_stat_with_subtema(
             info = MatchInfo(method, score, _classify_temperature(method, score))
             return stat, info
 
-    # Semantic fallback — search for tema+subtema via embeddings
+    # Semantic fallback — multiple subtema-only query strategies via embeddings
     if embedder and subtema_raw:
-        query = f"{resolved_tema} {subtema_raw}"
-        embedding = embedder.embed(query)
-        results = db.semantic_search_theme_stats(
-            query_embedding=embedding,
-            query_text=query,
-            top_k=3,
-        )
-        for r in results:
-            if r.get("tema", "").lower() == resolved_tema.lower() and r.get("subtema"):
-                score = r.get("hybrid_score", 0) or 0
-                if score >= 0.35:
-                    logger.debug(
-                        "[_find_stat_with_subtema] semantic match subtema='%s' score=%.3f",
-                        r["subtema"],
-                        score,
-                    )
-                    info = MatchInfo(MATCH_SEMANTIC, score, _classify_temperature(MATCH_SEMANTIC, score))
-                    return r, info
+        # Try multiple queries: combined, subtema-only, significant words
+        semantic_queries = [
+            f"{resolved_tema} {subtema_raw}",
+            subtema_raw,
+        ]
+        if norm_subtema and norm_subtema != subtema_raw:
+            semantic_queries.append(norm_subtema)
+        # Add significant words from subtema (>3 chars) combined with tema
+        words = [w for w in subtema_raw.split() if len(w) > 3]
+        for w in words:
+            semantic_queries.append(f"{resolved_tema} {w}")
 
-    # Best subtema under resolved tema (ordered by num_questions DESC)
-    # This is a guess — tema matched but subtema didn't, so we pick the top one
-    subtemas = db.get_subtemas_for_tema(resolved_tema)
-    if subtemas:
-        score = base.score * 0.40  # significant penalty: subtema is a guess
-        method = MATCH_SEMANTIC
-        info = MatchInfo(method, score, _classify_temperature(method, score))
-        return subtemas[0], info
+        best_result = None
+        best_score = 0.0
 
-    # Last resort: tema-level row (no subtema match at all)
-    stat = db.get_theme_stat(resolved_tema, None)
-    if stat:
-        score = base.score * 0.40
-        method = MATCH_SEMANTIC
-        info = MatchInfo(method, score, _classify_temperature(method, score))
-        return stat, info
+        # Batch embed all queries at once for speed
+        embeddings = embedder.embed_batch(semantic_queries)
 
+        for query, embedding in zip(semantic_queries, embeddings):
+            results = db.semantic_search_theme_stats(
+                query_embedding=embedding,
+                query_text=query,
+                top_k=5,
+            )
+            for r in results:
+                if r.get("tema", "").lower() == resolved_tema.lower() and r.get("subtema"):
+                    score = r.get("hybrid_score", 0) or 0
+                    if score > best_score and score >= 0.35:
+                        best_result = r
+                        best_score = score
+
+        if best_result:
+            logger.debug(
+                "[_find_stat_with_subtema] semantic match subtema='%s' score=%.3f",
+                best_result["subtema"],
+                best_score,
+            )
+            info = MatchInfo(
+                MATCH_SEMANTIC,
+                best_score,
+                _classify_temperature(MATCH_SEMANTIC, best_score),
+            )
+            return best_result, info
+
+    # No subtema match found at all.
+    # DO NOT fallback to tema-level or guess a subtema — subtema must match subtema.
+    # Return None so the row shows as unmatched at subtema level.
     return None, MatchInfo()
 
 
@@ -463,62 +494,87 @@ def reconcile_row(
         num_questions=num_questions,
         match_method=match_info.method,
         match_score=match_info.score,
-        match_label=match_info.label or _classify_temperature(match_info.method, match_info.score),
+        match_label=match_info.label
+        or _classify_temperature(match_info.method, match_info.score),
         cor_hex=cor_hex,
         notes=notes,
     )
 
 
-def _dedup_key(row: ReconciledRow) -> str:
-    """Build a deduplication key from normalized tema + subtema."""
-    tema = (row.normalized_tema or "").strip().lower()
-    subtema = (row.normalized_subtema or "").strip().lower()
-    return f"{tema}||{subtema}"
-
-
 def _retry_low_score(
     row: dict[str, Any],
+    original: ReconciledRow,
     embedder: BaseEmbedder,
     db: DBClient,
 ) -> ReconciledRow | None:
-    """Re-attempt reconciliation with alternative query strategies.
+    """Lightweight retry — only re-does the semantic search with variant queries.
 
-    Strategies tried:
-    1. Use only the tema (drop subtema noise)
-    2. Use only the equivalencia hint
-    3. Use tema + each word from subtema separately
+    Instead of calling full reconcile_row (which re-embeds, re-retrieves candidates),
+    this batch-embeds all variant queries and picks the best semantic match.
     """
     tema_raw = str(row.get("tema", "")).strip()
     subtema_raw = row.get("subtema")
     equivalencia = row.get("equivalencia")
+    has_subtema = subtema_raw and str(subtema_raw).strip().lower() != "nan"
 
-    variants = [tema_raw]
+    variants = []
     if equivalencia and str(equivalencia).strip().lower() != "nan":
         variants.append(str(equivalencia).strip())
-    if subtema_raw and str(subtema_raw).strip().lower() != "nan":
-        # Try tema + individual subtema words
-        for word in str(subtema_raw).split():
+    if has_subtema:
+        sub = str(subtema_raw).strip()
+        variants.append(f"{tema_raw} {sub}")
+        for word in sub.split():
             if len(word) > 3:
                 variants.append(f"{tema_raw} {word}")
+    if not variants:
+        return None
 
-    best_result = None
-    for variant in variants:
-        alt_row = {**row, "tema": variant, "subtema": None, "equivalencia": None}
-        try:
-            result = reconcile_row(alt_row, embedder, db)
-            if best_result is None or result.match_score > best_result.match_score:
-                # Preserve original input display
-                result.input_tema = (
-                    f"{tema_raw} | {subtema_raw}" if subtema_raw else tema_raw
-                )
-                result.input_equivalencia = result.input_equivalencia or equivalencia
-                best_result = result
-                if result.match_score >= MIN_ACCEPTABLE_SCORE:
-                    break
-        except Exception:
-            continue
+    # Batch embed all variants at once (single model call)
+    embeddings = embedder.embed_batch(variants)
 
-    return best_result
+    best_tema = None
+    best_score = original.match_score
+    best_query = None
+
+    for query, emb in zip(variants, embeddings):
+        results = db.semantic_search_theme_stats(
+            query_embedding=emb, query_text=query, top_k=3,
+        )
+        if results and (results[0].get("hybrid_score", 0) or 0) > best_score:
+            best_score = results[0]["hybrid_score"]
+            best_tema = results[0]["tema"]
+            best_query = query
+            if best_score >= MIN_ACCEPTABLE_SCORE:
+                break
+
+    if not best_tema or best_score <= original.match_score:
+        return None
+
+    # Build a lightweight result using the improved tema match
+    stat, num_q = _find_stat_tema_only(best_tema, db)
+    if not stat:
+        return None
+
+    _, cor_hex = classify_color(num_q)
+    info = MatchInfo(
+        MATCH_SEMANTIC, best_score,
+        _classify_temperature(MATCH_SEMANTIC, best_score),
+    )
+    input_display = f"{tema_raw} | {subtema_raw}" if has_subtema else tema_raw
+
+    return ReconciledRow(
+        input_tema=input_display,
+        input_equivalencia=equivalencia,
+        normalized_tema=best_tema,
+        normalized_subtema=original.normalized_subtema,
+        num_questions=num_q,
+        match_method=info.method,
+        match_score=info.score,
+        match_label=info.label,
+        cor_hex=cor_hex,
+        notes=f"Retry via '{best_query[:40]}'; "
+              f"Fonte: {stat.get('institution', 'N/A')}",
+    )
 
 
 def reconcile_all(
@@ -526,12 +582,14 @@ def reconcile_all(
     embedder: BaseEmbedder,
     db: DBClient,
 ) -> list[ReconciledRow]:
+    """Reconcile every input row 1:1. No dedup — every input line produces one output line."""
     logger.info(
         "[reconcile_all] starting reconciliation of %d input rows", len(input_rows)
     )
     results = []
     for i, row in enumerate(input_rows, start=1):
-        logger.info("[reconcile_all] processing row %d / %d", i, len(input_rows))
+        if i % 50 == 0 or i == 1:
+            logger.info("[reconcile_all] processing row %d / %d", i, len(input_rows))
         try:
             result = reconcile_row(row, embedder, db)
             results.append(result)
@@ -549,35 +607,24 @@ def reconcile_all(
     # Retry rows with low scores using alternative queries
     for i, r in enumerate(results):
         if r.match_score < MIN_ACCEPTABLE_SCORE and r.match_method != MATCH_NONE:
-            row = input_rows[i]
-            retried = _retry_low_score(row, embedder, db)
+            retried = _retry_low_score(input_rows[i], r, embedder, db)
             if retried and retried.match_score > r.match_score:
                 logger.info(
                     "[reconcile_all] retry improved row %d: %.0f%% -> %.0f%%",
-                    i + 1, r.match_score * 100, retried.match_score * 100,
+                    i + 1,
+                    r.match_score * 100,
+                    retried.match_score * 100,
                 )
                 results[i] = retried
 
-    seen: dict[str, ReconciledRow] = {}
-    for r in results:
-        key = _dedup_key(r)
-        if key not in seen or r.match_score > seen[key].match_score:
-            seen[key] = r
-    deduped = list(seen.values())
-
-    if len(deduped) < len(results):
-        logger.info(
-            "[reconcile_all] deduplicated %d -> %d rows",
-            len(results),
-            len(deduped),
-        )
-
-    # Sort by score descending (highest confidence first)
-    deduped.sort(key=lambda r: r.match_score, reverse=True)
+    # Sort by score descending (highest confidence first) — NO dedup
+    results.sort(key=lambda r: r.match_score, reverse=True)
     logger.info(
-        "[reconcile_all] reconciliation complete: %d rows produced", len(deduped)
+        "[reconcile_all] reconciliation complete: %d rows in -> %d rows out",
+        len(input_rows),
+        len(results),
     )
-    return deduped
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -585,56 +632,22 @@ def reconcile_all(
 # ---------------------------------------------------------------------------
 
 
-def _build_input_embeddings(
-    input_rows: list[dict[str, Any]],
-    embedder: BaseEmbedder,
-) -> list[tuple[str, list[float]]]:
-    """Build (display_text, embedding) pairs for all input rows."""
-    texts = []
-    displays = []
-    for row in input_rows:
-        tema = str(row.get("tema", "")).strip()
-        subtema = row.get("subtema")
-        equiv = row.get("equivalencia")
-        parts = [tema]
-        if subtema and str(subtema).strip().lower() != "nan":
-            parts.append(str(subtema).strip())
-        if equiv and str(equiv).strip().lower() != "nan":
-            parts.append(str(equiv).strip())
-        text = " ".join(parts)
-        display = (
-            f"{tema} | {subtema}"
-            if subtema and str(subtema).strip().lower() != "nan"
-            else tema
-        )
-        texts.append(text)
-        displays.append(display)
-
-    embeddings = embedder.embed_batch(texts) if texts else []
-    return list(zip(displays, embeddings))
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
 def reverse_coverage(
-    input_rows: list[dict[str, Any]],
+    reconciled: list[ReconciledRow],
     embedder: BaseEmbedder,
     db: DBClient,
-    coverage_threshold: float = 0.45,
-    partial_threshold: float = 0.30,
+    coverage_threshold: float = 0.50,
+    partial_threshold: float = 0.35,
 ) -> list[ReverseRow]:
-    """For each theme_stat in the DB, check if any input row covers it.
+    """For each theme_stat in the DB (equivalência), check if any reconciled
+    result from Table 1 covers it.
 
-    This is the 'reverse' view: the DB themes are the 'input' and
-    the user's spreadsheet entries are the 'equivalence'.
-    Uses semantic similarity (embeddings) to find matches.
+    This inverts the mapping from reconcile_all:
+      Table 1: Manchester (input) → equivalência (DB match)
+      Table 2: equivalência (DB) → which Manchester rows matched it?
+
+    Uses the already-computed match scores from reconcile_all, plus a
+    semantic fallback for DB entries that weren't directly matched.
     """
     logger.info("[reverse_coverage] starting reverse coverage analysis")
 
@@ -643,72 +656,126 @@ def reverse_coverage(
         logger.warning("[reverse_coverage] no theme_stats found in DB")
         return []
 
-    input_pairs = _build_input_embeddings(input_rows, embedder)
-    if not input_pairs:
-        logger.warning("[reverse_coverage] no input rows to compare")
-        return [
-            ReverseRow(
-                db_tema=s["tema"],
-                db_subtema=s.get("subtema"),
-                db_num_questions=s["num_questions"],
-                db_cor_hex=s.get("cor_hex", "#22C55E"),
-                matched_input=None,
-                similarity_score=0.0,
-                coverage_status="não coberto",
-                notes="Nenhuma entrada fornecida",
-            )
-            for s in all_stats
-        ]
+    # Build a mapping: (normalized_tema, normalized_subtema) → best reconciled row
+    matched_map: dict[tuple[str, str | None], ReconciledRow] = {}
+    for r in reconciled:
+        key = (r.normalized_tema.lower(), (r.normalized_subtema or "").lower() or None)
+        existing = matched_map.get(key)
+        if existing is None or r.match_score > existing.match_score:
+            matched_map[key] = r
 
-    # Build embeddings for each DB theme_stat text
-    stat_texts = []
-    for s in all_stats:
-        text = s["tema"]
-        if s.get("subtema"):
-            text += f" {s['subtema']}"
-        stat_texts.append(text)
-    stat_embeddings = embedder.embed_batch(stat_texts)
+    # For semantic fallback: embed unique reconciled temas (dedup for speed)
+    seen_texts: dict[str, int] = {}
+    reconciled_texts = []
+    reconciled_displays = []
+    for r in reconciled:
+        text = r.normalized_tema
+        if r.normalized_subtema:
+            text += f" {r.normalized_subtema}"
+        if text not in seen_texts:
+            seen_texts[text] = len(reconciled_texts)
+            reconciled_texts.append(text)
+            reconciled_displays.append(r.input_tema)
+    reconciled_embeddings = (
+        embedder.embed_batch(reconciled_texts) if reconciled_texts else []
+    )
 
     results = []
-    for stat, stat_emb in zip(all_stats, stat_embeddings):
-        best_score = 0.0
-        best_input = None
+    unmatched_stats = []
+    unmatched_indices = []
 
-        for display, input_emb in input_pairs:
-            sim = _cosine_similarity(stat_emb, input_emb)
-            if sim > best_score:
-                best_score = sim
-                best_input = display
+    for stat in all_stats:
+        stat_tema = stat["tema"].lower()
+        stat_subtema = (stat.get("subtema") or "").lower() or None
 
-        if best_score >= coverage_threshold:
-            status = "coberto"
-        elif best_score >= partial_threshold:
-            status = "parcial"
+        # Try exact key match first
+        matched_row = matched_map.get((stat_tema, stat_subtema))
+
+        # Also try tema-only match if subtema didn't match
+        if not matched_row and stat_subtema is None:
+            # Check if any reconciled row matched this tema (ignoring subtema)
+            for key, row in matched_map.items():
+                if key[0] == stat_tema:
+                    if matched_row is None or row.match_score > matched_row.match_score:
+                        matched_row = row
+
+        if matched_row and matched_row.match_score >= partial_threshold:
+            score = matched_row.match_score
+            status = "coberto" if score >= coverage_threshold else "parcial"
+            notes = f"Match: {matched_row.input_tema} (score={score:.0%})"
+            results.append(
+                ReverseRow(
+                    db_tema=stat["tema"],
+                    db_subtema=stat.get("subtema"),
+                    db_num_questions=stat["num_questions"],
+                    db_cor_hex=stat.get("cor_hex", "#22C55E"),
+                    matched_input=matched_row.input_tema,
+                    similarity_score=score,
+                    coverage_status=status,
+                    notes=notes,
+                )
+            )
         else:
-            status = "não coberto"
+            # Will try semantic fallback
+            unmatched_stats.append(stat)
+            unmatched_indices.append(len(results))
+            results.append(None)  # placeholder
 
-        notes_parts = []
-        if best_input:
-            notes_parts.append(f"Melhor match: {best_input}")
-        notes_parts.append(f"Similaridade: {best_score:.2%}")
+    # Semantic fallback for DB entries not directly matched by reconcile_all
+    if unmatched_stats and reconciled_embeddings:
+        stat_texts = []
+        for s in unmatched_stats:
+            text = s["tema"]
+            if s.get("subtema"):
+                text += f" {s['subtema']}"
+            stat_texts.append(text)
+        stat_embeddings = embedder.embed_batch(stat_texts)
 
-        results.append(
-            ReverseRow(
+        # Vectorized cosine similarity via numpy (much faster than Python loops)
+        stat_matrix = np.array(stat_embeddings, dtype=np.float32)
+        rec_matrix = np.array(reconciled_embeddings, dtype=np.float32)
+        # Normalize rows
+        stat_norms = np.linalg.norm(stat_matrix, axis=1, keepdims=True)
+        rec_norms = np.linalg.norm(rec_matrix, axis=1, keepdims=True)
+        stat_norms[stat_norms == 0] = 1.0
+        rec_norms[rec_norms == 0] = 1.0
+        # Cosine similarity matrix: (unmatched_stats x reconciled)
+        sim_matrix = (stat_matrix / stat_norms) @ (rec_matrix / rec_norms).T
+        best_indices = np.argmax(sim_matrix, axis=1)
+        best_scores = sim_matrix[np.arange(len(unmatched_stats)), best_indices]
+
+        for i, stat in enumerate(unmatched_stats):
+            best_score = float(best_scores[i])
+            best_display = reconciled_displays[int(best_indices[i])]
+
+            if best_score >= coverage_threshold:
+                status = "coberto"
+            elif best_score >= partial_threshold:
+                status = "parcial"
+            else:
+                status = "não coberto"
+
+            notes_parts = []
+            if best_score >= partial_threshold:
+                notes_parts.append(f"Melhor match (semântico): {best_display}")
+            notes_parts.append(f"Similaridade: {best_score:.2%}")
+
+            results[unmatched_indices[i]] = ReverseRow(
                 db_tema=stat["tema"],
                 db_subtema=stat.get("subtema"),
                 db_num_questions=stat["num_questions"],
                 db_cor_hex=stat.get("cor_hex", "#22C55E"),
-                matched_input=best_input if best_score >= partial_threshold else None,
+                matched_input=best_display if best_score >= partial_threshold else None,
                 similarity_score=best_score,
                 coverage_status=status,
                 notes="; ".join(notes_parts),
             )
-        )
 
-    status_order = {"não coberto": 0, "parcial": 1, "coberto": 2}
-    results.sort(
-        key=lambda r: (status_order.get(r.coverage_status, 3), -r.db_num_questions)
-    )
+    # Remove any None placeholders (shouldn't happen, but safety)
+    results = [r for r in results if r is not None]
+
+    # Sort by similarity descending (highest first)
+    results.sort(key=lambda r: r.similarity_score, reverse=True)
 
     covered = sum(1 for r in results if r.coverage_status == "coberto")
     partial = sum(1 for r in results if r.coverage_status == "parcial")

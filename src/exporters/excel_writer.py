@@ -53,19 +53,19 @@ REVERSE_HEADERS = {
 }
 
 ROW_COLORS = {
-    "#EF4444": "00FECACA",   # vermelho → fundo rosa claro
-    "#F97316": "00FED7AA",   # laranja → fundo pêssego
-    "#EAB308": "00FEF9C3",   # amarelo → fundo amarelo claro
-    "#22C55E": "00DCFCE7",   # verde → fundo verde claro
-    "#3B82F6": "00DBEAFE",   # azul → fundo azul claro
+    "#EF4444": "00FECACA",  # vermelho → fundo rosa claro
+    "#F97316": "00FED7AA",  # laranja → fundo pêssego
+    "#EAB308": "00FEF9C3",  # amarelo → fundo amarelo claro
+    "#22C55E": "00DCFCE7",  # verde → fundo verde claro
+    "#3B82F6": "00DBEAFE",  # azul → fundo azul claro
 }
 
 BADGE_COLORS = {
-    "#EF4444": ("00EF4444", "00FFFFFF"),   # vermelho
-    "#F97316": ("00F97316", "00FFFFFF"),   # laranja
-    "#EAB308": ("00EAB308", "00000000"),   # amarelo
-    "#22C55E": ("0022C55E", "00000000"),   # verde
-    "#3B82F6": ("003B82F6", "00FFFFFF"),   # azul
+    "#EF4444": ("00EF4444", "00FFFFFF"),  # vermelho
+    "#F97316": ("00F97316", "00FFFFFF"),  # laranja
+    "#EAB308": ("00EAB308", "00000000"),  # amarelo
+    "#22C55E": ("0022C55E", "00000000"),  # verde
+    "#3B82F6": ("003B82F6", "00FFFFFF"),  # azul
 }
 
 COVERAGE_COLORS = {
@@ -242,17 +242,24 @@ def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
         cell.alignment = copy(center)
         cell.border = _make_border()
 
-    # Find coverage_status column index
+    # Find special column indices
+    num_q_col = None
     status_col = None
+    sim_col = None
     for i, c in enumerate(REVERSE_COLUMNS):
-        if c == "coverage_status":
+        if c == "db_num_questions":
+            num_q_col = i + 1
+        elif c == "coverage_status":
             status_col = i + 1
-            break
+        elif c == "similarity_score":
+            sim_col = i + 1
 
     for row_idx in range(2, num_rows + 1):
         rr_idx = row_idx - 2
         rr = reverse_rows[rr_idx] if rr_idx < len(reverse_rows) else None
-        row_color = COVERAGE_COLORS.get(rr.coverage_status) if rr else None
+        hex_value = rr.db_cor_hex if rr else None
+        row_argb = ROW_COLORS.get(hex_value) if hex_value else None
+        badge = BADGE_COLORS.get(hex_value) if hex_value else None
 
         for col_idx in range(1, num_cols + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
@@ -260,12 +267,22 @@ def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
             cell.alignment = copy(center)
             cell.font = copy(data_font)
 
-            if row_color:
-                cell.fill = _make_fill(row_color)
-
-            # Bold the status cell
-            if col_idx == status_col and rr:
+            if col_idx == num_q_col and badge:
+                # Manchester badge color on num_questions
+                cell.fill = _make_fill(badge[0])
+                cell.font = Font(color=badge[1], bold=True, size=11)
+            elif col_idx == status_col and rr:
+                # Coverage status colored by coverage level
+                cov_color = COVERAGE_COLORS.get(rr.coverage_status)
+                if cov_color:
+                    cell.fill = _make_fill(cov_color)
                 cell.font = Font(size=11, bold=True, color="00000000")
+            elif col_idx == sim_col and rr:
+                cell.font = Font(size=11, bold=True, color="00000000")
+                if row_argb:
+                    cell.fill = _make_fill(row_argb)
+            elif row_argb:
+                cell.fill = _make_fill(row_argb)
 
     ws.row_dimensions[1].height = 30
     for row_idx in range(2, num_rows + 1):
@@ -275,10 +292,10 @@ def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
 
 
 CONFIDENCE_FILLS = {
-    "Quente": "00DCFCE7",   # green
-    "Morno": "00FEF9C3",    # yellow
-    "Frio": "00DBEAFE",     # light blue
-    "Sem match": "00FECACA", # red
+    "Quente": "00DCFCE7",  # green
+    "Morno": "00FEF9C3",  # yellow
+    "Frio": "00DBEAFE",  # light blue
+    "Sem match": "00FECACA",  # red
 }
 
 

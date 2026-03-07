@@ -96,7 +96,7 @@ def cmd_reconcile(args: argparse.Namespace) -> None:
 
     input_rows = read_excel(args.input)
     results = reconcile_all(input_rows, embedder, db)
-    reverse_rows = reverse_coverage(input_rows, embedder, db)
+    reverse_rows = reverse_coverage(results, embedder, db)
     write_excel(results, args.output, also_csv=args.csv, reverse_rows=reverse_rows)
 
     db.close()
