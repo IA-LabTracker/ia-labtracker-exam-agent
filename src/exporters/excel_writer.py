@@ -80,7 +80,6 @@ CONFIDENCE_FILLS = {
     "Sem match": "00FECACA",  # red
 }
 
-
 # Pre-built immutable style objects (avoid copy() per cell)
 _BORDER = Border(
     left=Side(style="thin", color="00000000"),
@@ -98,6 +97,12 @@ _BOLD_FONT = Font(size=11, bold=True, color="00000000")
 
 # Pre-build fill objects for each color (avoid creating per cell)
 _FILL_CACHE: dict[str, PatternFill] = {}
+
+# Pre-build badge fonts (avoid creating per row)
+_BADGE_FONT_CACHE: dict[str, Font] = {
+    hex_val: Font(color=fg, bold=True, size=11)
+    for hex_val, (bg, fg) in BADGE_COLORS.items()
+}
 
 
 def _get_fill(argb: str) -> PatternFill:
@@ -129,15 +134,15 @@ def write_excel(
     df = pd.DataFrame(records)
     df = df[[c for c in COLUMNS if c in df.columns]]
 
+    # Write data AND style in a single pass (no load_workbook round-trip)
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Ranking")
 
         if reverse_rows:
             rev_records = []
-            rev_cor_list = []
             for rr in reverse_rows:
                 d = asdict(rr)
-                rev_cor_list.append(d.pop("db_cor_hex", "#22C55E"))
+                d.pop("db_cor_hex", None)
                 d["db_num_questions"] = f"{d['db_num_questions']} questões"
                 d["similarity_score"] = f"{d['similarity_score']:.2%}"
                 rev_records.append(d)
@@ -145,7 +150,11 @@ def write_excel(
             df_rev = df_rev[[c for c in REVERSE_COLUMNS if c in df_rev.columns]]
             df_rev.to_excel(writer, index=False, sheet_name="Cobertura Reversa")
 
-    _apply_styling(output_path, df, cor_hex_list, reverse_rows)
+        # Style directly on the writer's workbook (avoids save → load → save)
+        wb = writer.book
+        _style_ranking_sheet(wb["Ranking"], df, cor_hex_list)
+        if reverse_rows and "Cobertura Reversa" in wb.sheetnames:
+            _style_reverse_sheet(wb["Cobertura Reversa"], reverse_rows)
 
     logger.info("Wrote %d rows to %s", len(df), output_path)
 
@@ -157,34 +166,12 @@ def write_excel(
     return output_path
 
 
-def _apply_styling(
-    path: Path,
-    df: pd.DataFrame,
-    cor_hex_list: list[str],
-    reverse_rows: list[ReverseRow] | None = None,
-) -> None:
-    from openpyxl import load_workbook
-
-    wb = load_workbook(path)
-
-    ws = wb["Ranking"]
-    _style_ranking_sheet(ws, df, cor_hex_list)
-
-    if reverse_rows and "Cobertura Reversa" in wb.sheetnames:
-        ws_rev = wb["Cobertura Reversa"]
-        _style_reverse_sheet(ws_rev, reverse_rows)
-
-    wb.save(path)
-
-
 def _style_ranking_sheet(ws, df: pd.DataFrame, cor_hex_list: list[str]) -> None:
     num_cols = ws.max_column
     num_rows = ws.max_row
 
-    # Pre-build badge font cache: hex → Font
-    badge_font_cache: dict[str, Font] = {}
-    for hex_val, (bg, fg) in BADGE_COLORS.items():
-        badge_font_cache[hex_val] = Font(color=fg, bold=True, size=11)
+    # Track column widths during styling (eliminates second pass)
+    col_max_len = [0] * (num_cols + 1)
 
     for col_idx in range(1, num_cols + 1):
         cell = ws.cell(row=1, column=col_idx)
@@ -194,6 +181,8 @@ def _style_ranking_sheet(ws, df: pd.DataFrame, cor_hex_list: list[str]) -> None:
         cell.font = _HEADER_FONT
         cell.alignment = _CENTER
         cell.border = _BORDER
+        if cell.value:
+            col_max_len[col_idx] = len(str(cell.value))
 
     num_q_col = (
         (list(df.columns).index("num_questions") + 1)
@@ -224,9 +213,13 @@ def _style_ranking_sheet(ws, df: pd.DataFrame, cor_hex_list: list[str]) -> None:
             cell.alignment = _CENTER
             cell.font = _DATA_FONT
 
+            # Track column width
+            if cell.value:
+                col_max_len[col_idx] = max(col_max_len[col_idx], len(str(cell.value)))
+
             if col_idx == num_q_col and badge:
                 cell.fill = _get_fill(badge[0])
-                cell.font = badge_font_cache.get(hex_value, _BOLD_FONT)
+                cell.font = _BADGE_FONT_CACHE.get(hex_value, _BOLD_FONT)
             elif col_idx == confidence_col or col_idx == score_col:
                 val = str(cell.value or "")
                 if "Quente" in val or col_idx == score_col:
@@ -239,17 +232,20 @@ def _style_ranking_sheet(ws, df: pd.DataFrame, cor_hex_list: list[str]) -> None:
     for row_idx in range(2, num_rows + 1):
         ws.row_dimensions[row_idx].height = 25
 
-    _auto_fit_columns(ws, num_cols, num_rows)
+    # Apply column widths (already computed during loop)
+    for col_idx in range(1, num_cols + 1):
+        col_letter = ws.cell(row=1, column=col_idx).column_letter
+        ws.column_dimensions[col_letter].width = min(
+            max(col_max_len[col_idx] + 4, 15), 55
+        )
 
 
 def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
     num_cols = ws.max_column
     num_rows = ws.max_row
 
-    # Pre-build badge font cache
-    badge_font_cache: dict[str, Font] = {}
-    for hex_val, (bg, fg) in BADGE_COLORS.items():
-        badge_font_cache[hex_val] = Font(color=fg, bold=True, size=11)
+    # Track column widths during styling
+    col_max_len = [0] * (num_cols + 1)
 
     rev_col_names = list(REVERSE_COLUMNS)
     for col_idx in range(1, num_cols + 1):
@@ -260,6 +256,8 @@ def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
         cell.font = _HEADER_FONT
         cell.alignment = _CENTER
         cell.border = _BORDER
+        if cell.value:
+            col_max_len[col_idx] = len(str(cell.value))
 
     num_q_col = None
     status_col = None
@@ -285,9 +283,13 @@ def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
             cell.alignment = _CENTER
             cell.font = _DATA_FONT
 
+            # Track column width
+            if cell.value:
+                col_max_len[col_idx] = max(col_max_len[col_idx], len(str(cell.value)))
+
             if col_idx == num_q_col and badge:
                 cell.fill = _get_fill(badge[0])
-                cell.font = badge_font_cache.get(hex_value, _BOLD_FONT)
+                cell.font = _BADGE_FONT_CACHE.get(hex_value, _BOLD_FONT)
             elif col_idx == status_col and rr:
                 cov_color = COVERAGE_COLORS.get(rr.coverage_status)
                 if cov_color:
@@ -304,7 +306,12 @@ def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
     for row_idx in range(2, num_rows + 1):
         ws.row_dimensions[row_idx].height = 25
 
-    _auto_fit_columns(ws, num_cols, num_rows)
+    # Apply column widths (already computed during loop)
+    for col_idx in range(1, num_cols + 1):
+        col_letter = ws.cell(row=1, column=col_idx).column_letter
+        ws.column_dimensions[col_letter].width = min(
+            max(col_max_len[col_idx] + 4, 15), 55
+        )
 
 
 def _apply_confidence_fill(cell, label_value: str, fallback_argb: str | None) -> None:
@@ -315,14 +322,3 @@ def _apply_confidence_fill(cell, label_value: str, fallback_argb: str | None) ->
             return
     if fallback_argb:
         cell.fill = _get_fill(fallback_argb)
-
-
-def _auto_fit_columns(ws, num_cols: int, num_rows: int) -> None:
-    for col_idx in range(1, num_cols + 1):
-        col_letter = ws.cell(row=1, column=col_idx).column_letter
-        max_len = 0
-        for row_idx in range(1, num_rows + 1):
-            val = ws.cell(row=row_idx, column=col_idx).value
-            if val:
-                max_len = max(max_len, len(str(val)))
-        ws.column_dimensions[col_letter].width = min(max(max_len + 4, 15), 55)

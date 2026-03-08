@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -17,9 +15,13 @@ class DBClient:
         self._dsn = dsn or get_settings().database_url
         self._conn: psycopg.Connection | None = None
         # Session-level caches — cleared on close()
-        self._theme_stat_cache: dict[tuple[str, str | None, str | None], dict | None] = {}
+        self._theme_stat_cache: dict[
+            tuple[str, str | None, str | None], dict | None
+        ] = {}
         self._subtemas_cache: dict[tuple[str, str | None], list[dict]] = {}
         self._all_theme_stats_cache: list[dict] | None = None
+        self._fts_cache: dict[tuple[str, str | None], dict | None] = {}
+        self._semantic_cache: dict[tuple[str, int], list[dict]] = {}
 
     def connect(self) -> DBClient:
         self._conn = psycopg.connect(self._dsn, row_factory=dict_row, autocommit=True)
@@ -43,6 +45,8 @@ class DBClient:
         self._theme_stat_cache.clear()
         self._subtemas_cache.clear()
         self._all_theme_stats_cache = None
+        self._fts_cache.clear()
+        self._semantic_cache.clear()
 
     def run_migrations(self) -> None:
         sql_dir = get_settings().sql_dir
@@ -182,14 +186,20 @@ class DBClient:
         Tries exact match first, then FTS, to find the best matching
         theme_stat entry for a given query string.
         """
+        cache_key = (query.lower(), institution)
+        if cache_key in self._fts_cache:
+            return self._fts_cache[cache_key]
+
         if "|" in query:
             parts = [p.strip() for p in query.split("|", 1)]
             exact = self.get_theme_stat(parts[0], parts[1], institution)
             if exact:
+                self._fts_cache[cache_key] = exact
                 return exact
 
         exact = self.get_theme_stat(query, None, institution)
         if exact:
+            self._fts_cache[cache_key] = exact
             return exact
 
         base_query = (
@@ -203,7 +213,9 @@ class DBClient:
         base_query += " ORDER BY num_questions DESC LIMIT 1"
 
         row = self.conn.execute(base_query, params).fetchone()
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        self._fts_cache[cache_key] = result
+        return result
 
     def get_subtemas_for_tema(
         self, tema: str, institution: str | None = None
@@ -257,6 +269,11 @@ class DBClient:
         alpha: float = 0.7,
         beta: float = 0.3,
     ) -> list[dict]:
+        # Cache by (query_text, top_k) — same text always produces same embedding
+        cache_key = (query_text.lower().strip(), top_k)
+        if cache_key in self._semantic_cache:
+            return self._semantic_cache[cache_key]
+
         logger.debug(
             "[semantic_search_theme_stats] query_text='%s' top_k=%d",
             query_text[:100],
@@ -268,7 +285,9 @@ class DBClient:
                 (str(query_embedding), query_text, top_k, alpha, beta),
             ).fetchall()
             logger.debug("[semantic_search_theme_stats] returned %d rows", len(rows))
-            return [dict(r) for r in rows]
+            result = [dict(r) for r in rows]
+            self._semantic_cache[cache_key] = result
+            return result
         except Exception as exc:
             logger.error("[semantic_search_theme_stats] error: %s", exc, exc_info=True)
             return []

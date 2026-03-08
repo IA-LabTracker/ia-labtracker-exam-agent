@@ -34,33 +34,39 @@ class LLMVerdict:
 
 SYSTEM_PROMPT = """\
 Voce e um especialista em curriculos de residencia medica brasileira.
-Sua tarefa e avaliar se dois temas/subtemas de provas medicas sao equivalentes.
+
+Sua tarefa: dado um tema de prova medica (INPUT) e uma lista de candidatos encontrados no banco de dados, \
+voce deve decidir qual candidato e o melhor match — ou se nenhum candidato e equivalente.
+
+O sistema ja fez uma busca automatica e encontrou um MATCH ATUAL com um score de confianca. \
+Alem disso, fizemos buscas adicionais no banco e encontramos CANDIDATOS ALTERNATIVOS. \
+Voce deve analisar TODOS os candidatos e escolher o melhor.
 
 Regras:
 1. Considere sinonimos medicos (ex: "IAM" = "Infarto Agudo do Miocardio" = "Sindrome Coronariana Aguda")
-2. Subtemas podem estar contidos em temas mais amplos (ex: "Triagem Neonatal" contem "Teste do Coracaozinho" e "Teste da Oximetria")
-3. Considere abreviacoes comuns (PCR = Parada Cardiorrespiratoria, ITU = Infeccao do Trato Urinario, DPOC = Doenca Pulmonar Obstrutiva Cronica)
-4. Diferentes bancas (FAMERP, USP, UNICAMP, UNIFESP, etc.) usam terminologias diferentes para o mesmo assunto
-5. Seja rigoroso: temas de especialidades diferentes NAO sao equivalentes mesmo que compartilhem palavras
-6. Para cada item, primeiro explique brevemente o que cada tema significa, depois de o veredito
+2. Subtemas podem estar contidos em temas mais amplos (ex: "Triagem Neonatal" contem "Teste do Coracaozinho")
+3. Considere abreviacoes comuns (PCR, ITU, DPOC, RN, SCA, TEP, etc.)
+4. Diferentes bancas (FAMERP, USP, UNICAMP, UNIFESP) usam terminologias diferentes para o mesmo assunto
+5. Seja rigoroso: temas de especialidades diferentes NAO sao equivalentes
+6. Se um candidato alternativo for MELHOR que o match atual, sugira-o em "suggested_match"
+7. Se o match atual estiver correto, retorne is_equivalent=true e suggested_match=null
+8. Se nenhum candidato for bom, retorne is_equivalent=false e suggested_match=null
 
-Exemplos de equivalencia:
-- "PCR" = "Parada Cardiorrespiratoria" = "Parada Cardiaca" → EQUIVALENTES (sinonimos)
-- "Avaliacao do Recem-nascido | Triagem Neonatal" ≈ "Triagem neonatal | Teste do Coracaozinho" → EQUIVALENTES (subtema contido)
-- "Diabetes" ≈ "Diabetes Mellitus | Tipo 2" → EQUIVALENTES (tema amplo contem subtema)
-- "Queimaduras" (Cirurgia) != "Queimaduras" (Dermatologia) → NAO EQUIVALENTES (especialidades diferentes)
-- "Pneumonia" != "DPOC" → NAO EQUIVALENTES (doencas distintas)
-- "Trauma | Abordagem Inicial" ≈ "Politraumatizado | Atendimento Inicial" → EQUIVALENTES (mesma abordagem, terminologia diferente)
+Exemplos:
+- INPUT "Avaliacao do RN | Triagem Neonatal" + candidato "Triagem neonatal | Teste do Coracaozinho" → EQUIVALENTES
+- INPUT "Trauma | Abordagem Inicial" + candidato "Politraumatizado | Atendimento Inicial" → EQUIVALENTES
+- INPUT "Pneumonia" + candidato "DPOC" → NAO EQUIVALENTES (doencas distintas)
+- INPUT "Queimaduras" (Cirurgia) + candidato "Queimaduras" (Dermatologia) → NAO EQUIVALENTES
 
-Responda SEMPRE em JSON valido com esta estrutura exata:
+Responda SEMPRE em JSON valido:
 {
   "results": [
     {
       "index": 0,
       "is_equivalent": true/false,
       "confidence": 0.0-1.0,
-      "suggested_match": "tema sugerido do banco ou null se o match atual esta correto",
-      "reasoning": "O que cada tema significa e por que sao/nao sao equivalentes (1-2 frases)"
+      "suggested_match": "tema | subtema do banco que e melhor match, ou null",
+      "reasoning": "Explicacao curta do por que (1-2 frases)"
     }
   ]
 }"""
@@ -79,20 +85,27 @@ def _build_batch_prompt(
         current_score = item.get("current_score", 0)
 
         cand_lines = []
-        for c in candidates[:5]:
+        seen = set()
+        # Include current match as first candidate
+        if current_match:
+            cand_lines.append(f"  * [MATCH ATUAL] {current_match} (score={current_score:.0%})")
+            seen.add(current_match.lower())
+
+        for c in candidates[:10]:
             t = c.get("tema", "")
             s = c.get("subtema", "")
             nq = c.get("num_questions", 0)
             label = f"{t} | {s}" if s else t
-            cand_lines.append(f"  - {label} ({nq} questoes)")
+            if label.lower() not in seen:
+                seen.add(label.lower())
+                cand_lines.append(f"  - {label} ({nq} questoes)")
 
         parts.append(
             f'[{i}] INPUT: tema="{input_tema}"'
             + (f' subtema="{input_subtema}"' if input_subtema else "")
-            + f'\n    MATCH ATUAL: "{current_match}" (score={current_score:.0%})'
-            + f"\n    CANDIDATOS DO BANCO:"
+            + "\n    CANDIDATOS ENCONTRADOS NO BANCO:"
             + ("\n" + "\n".join(cand_lines) if cand_lines else "\n  (nenhum)")
-            + "\n    PERGUNTA: O match atual esta correto? Se nao, qual candidato e melhor?"
+            + "\n    TAREFA: Qual candidato e o melhor match para o INPUT? O match atual esta correto ou existe um candidato melhor?"
         )
 
     return "\n\n".join(parts)

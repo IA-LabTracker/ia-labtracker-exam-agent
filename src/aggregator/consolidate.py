@@ -232,8 +232,11 @@ def reconcile_all(
 
         settings = get_settings()
         results = apply_llm_judge(
-            results, input_rows, llm_judge, db,
+            results,
+            llm_judge,
+            db,
             threshold=settings.llm_judge_threshold,
+            embedder=embedder,
         )
 
     # Sort by score descending (highest confidence first) — NO dedup
