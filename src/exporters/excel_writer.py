@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from copy import copy
 from dataclasses import asdict
 from pathlib import Path
 
 import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-from src.aggregator.consolidate import ReconciledRow, ReverseRow
+from src.aggregator.models import ReconciledRow, ReverseRow
 from src.utils.logging import logger
 
 COLUMNS = [
@@ -74,18 +73,40 @@ COVERAGE_COLORS = {
     "não coberto": "00FECACA",  # red
 }
 
-
-def _make_border() -> Border:
-    side = Side(style="thin", color="00000000")
-    return Border(left=side, right=side, top=side, bottom=side)
-
-
-def _make_header_fill() -> PatternFill:
-    return PatternFill(start_color="001F1F1F", end_color="001F1F1F", fill_type="solid")
+CONFIDENCE_FILLS = {
+    "Quente": "00DCFCE7",  # green
+    "Morno": "00FEF9C3",  # yellow
+    "Frio": "00DBEAFE",  # light blue
+    "Sem match": "00FECACA",  # red
+}
 
 
-def _make_fill(argb: str) -> PatternFill:
-    return PatternFill(start_color=argb, end_color=argb, fill_type="solid")
+# Pre-built immutable style objects (avoid copy() per cell)
+_BORDER = Border(
+    left=Side(style="thin", color="00000000"),
+    right=Side(style="thin", color="00000000"),
+    top=Side(style="thin", color="00000000"),
+    bottom=Side(style="thin", color="00000000"),
+)
+_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
+_HEADER_FILL = PatternFill(
+    start_color="001F1F1F", end_color="001F1F1F", fill_type="solid"
+)
+_HEADER_FONT = Font(color="00FFFFFF", bold=True, size=11)
+_DATA_FONT = Font(size=11, color="00000000")
+_BOLD_FONT = Font(size=11, bold=True, color="00000000")
+
+# Pre-build fill objects for each color (avoid creating per cell)
+_FILL_CACHE: dict[str, PatternFill] = {}
+
+
+def _get_fill(argb: str) -> PatternFill:
+    """Get or create a cached PatternFill for the given ARGB color."""
+    if argb not in _FILL_CACHE:
+        _FILL_CACHE[argb] = PatternFill(
+            start_color=argb, end_color=argb, fill_type="solid"
+        )
+    return _FILL_CACHE[argb]
 
 
 def write_excel(
@@ -146,11 +167,9 @@ def _apply_styling(
 
     wb = load_workbook(path)
 
-    # --- Style "Ranking" sheet ---
     ws = wb["Ranking"]
     _style_ranking_sheet(ws, df, cor_hex_list)
 
-    # --- Style "Cobertura Reversa" sheet ---
     if reverse_rows and "Cobertura Reversa" in wb.sheetnames:
         ws_rev = wb["Cobertura Reversa"]
         _style_reverse_sheet(ws_rev, reverse_rows)
@@ -162,18 +181,19 @@ def _style_ranking_sheet(ws, df: pd.DataFrame, cor_hex_list: list[str]) -> None:
     num_cols = ws.max_column
     num_rows = ws.max_row
 
-    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    header_font = Font(color="00FFFFFF", bold=True, size=11)
-    data_font = Font(size=11, color="00000000")
+    # Pre-build badge font cache: hex → Font
+    badge_font_cache: dict[str, Font] = {}
+    for hex_val, (bg, fg) in BADGE_COLORS.items():
+        badge_font_cache[hex_val] = Font(color=fg, bold=True, size=11)
 
     for col_idx in range(1, num_cols + 1):
         cell = ws.cell(row=1, column=col_idx)
         col_name = df.columns[col_idx - 1] if col_idx <= len(df.columns) else ""
         cell.value = COLUMN_HEADERS.get(col_name, cell.value)
-        cell.fill = _make_header_fill()
-        cell.font = copy(header_font)
-        cell.alignment = copy(center)
-        cell.border = _make_border()
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = _CENTER
+        cell.border = _BORDER
 
     num_q_col = (
         (list(df.columns).index("num_questions") + 1)
@@ -200,21 +220,20 @@ def _style_ranking_sheet(ws, df: pd.DataFrame, cor_hex_list: list[str]) -> None:
 
         for col_idx in range(1, num_cols + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
-            cell.border = _make_border()
-            cell.alignment = copy(center)
-            cell.font = copy(data_font)
+            cell.border = _BORDER
+            cell.alignment = _CENTER
+            cell.font = _DATA_FONT
 
             if col_idx == num_q_col and badge:
-                cell.fill = _make_fill(badge[0])
-                cell.font = Font(color=badge[1], bold=True, size=11)
+                cell.fill = _get_fill(badge[0])
+                cell.font = badge_font_cache.get(hex_value, _BOLD_FONT)
             elif col_idx == confidence_col or col_idx == score_col:
-                # Style confidence/score cells based on label content
                 val = str(cell.value or "")
                 if "Quente" in val or col_idx == score_col:
-                    cell.font = Font(size=11, bold=True, color="00000000")
+                    cell.font = _BOLD_FONT
                 _apply_confidence_fill(cell, val, row_argb)
             elif row_argb:
-                cell.fill = _make_fill(row_argb)
+                cell.fill = _get_fill(row_argb)
 
     ws.row_dimensions[1].height = 30
     for row_idx in range(2, num_rows + 1):
@@ -227,22 +246,21 @@ def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
     num_cols = ws.max_column
     num_rows = ws.max_row
 
-    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    header_font = Font(color="00FFFFFF", bold=True, size=11)
-    data_font = Font(size=11, color="00000000")
+    # Pre-build badge font cache
+    badge_font_cache: dict[str, Font] = {}
+    for hex_val, (bg, fg) in BADGE_COLORS.items():
+        badge_font_cache[hex_val] = Font(color=fg, bold=True, size=11)
 
-    # Headers
-    rev_col_names = [c for c in REVERSE_COLUMNS]
+    rev_col_names = list(REVERSE_COLUMNS)
     for col_idx in range(1, num_cols + 1):
         cell = ws.cell(row=1, column=col_idx)
         col_name = rev_col_names[col_idx - 1] if col_idx <= len(rev_col_names) else ""
         cell.value = REVERSE_HEADERS.get(col_name, cell.value)
-        cell.fill = _make_header_fill()
-        cell.font = copy(header_font)
-        cell.alignment = copy(center)
-        cell.border = _make_border()
+        cell.fill = _HEADER_FILL
+        cell.font = _HEADER_FONT
+        cell.alignment = _CENTER
+        cell.border = _BORDER
 
-    # Find special column indices
     num_q_col = None
     status_col = None
     sim_col = None
@@ -263,26 +281,24 @@ def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
 
         for col_idx in range(1, num_cols + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
-            cell.border = _make_border()
-            cell.alignment = copy(center)
-            cell.font = copy(data_font)
+            cell.border = _BORDER
+            cell.alignment = _CENTER
+            cell.font = _DATA_FONT
 
             if col_idx == num_q_col and badge:
-                # Manchester badge color on num_questions
-                cell.fill = _make_fill(badge[0])
-                cell.font = Font(color=badge[1], bold=True, size=11)
+                cell.fill = _get_fill(badge[0])
+                cell.font = badge_font_cache.get(hex_value, _BOLD_FONT)
             elif col_idx == status_col and rr:
-                # Coverage status colored by coverage level
                 cov_color = COVERAGE_COLORS.get(rr.coverage_status)
                 if cov_color:
-                    cell.fill = _make_fill(cov_color)
-                cell.font = Font(size=11, bold=True, color="00000000")
+                    cell.fill = _get_fill(cov_color)
+                cell.font = _BOLD_FONT
             elif col_idx == sim_col and rr:
-                cell.font = Font(size=11, bold=True, color="00000000")
+                cell.font = _BOLD_FONT
                 if row_argb:
-                    cell.fill = _make_fill(row_argb)
+                    cell.fill = _get_fill(row_argb)
             elif row_argb:
-                cell.fill = _make_fill(row_argb)
+                cell.fill = _get_fill(row_argb)
 
     ws.row_dimensions[1].height = 30
     for row_idx in range(2, num_rows + 1):
@@ -291,22 +307,14 @@ def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
     _auto_fit_columns(ws, num_cols, num_rows)
 
 
-CONFIDENCE_FILLS = {
-    "Quente": "00DCFCE7",  # green
-    "Morno": "00FEF9C3",  # yellow
-    "Frio": "00DBEAFE",  # light blue
-    "Sem match": "00FECACA",  # red
-}
-
-
 def _apply_confidence_fill(cell, label_value: str, fallback_argb: str | None) -> None:
     """Color the confidence cell based on its temperature label."""
     for keyword, argb in CONFIDENCE_FILLS.items():
         if keyword in label_value:
-            cell.fill = _make_fill(argb)
+            cell.fill = _get_fill(argb)
             return
     if fallback_argb:
-        cell.fill = _make_fill(fallback_argb)
+        cell.fill = _get_fill(fallback_argb)
 
 
 def _auto_fit_columns(ws, num_cols: int, num_rows: int) -> None:
