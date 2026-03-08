@@ -81,6 +81,23 @@ def _generate_theme_stats_embeddings(db, embedder) -> None:
     logger.info("Generated embeddings for %d theme_stats entries", len(pending))
 
 
+def _create_llm_judge():
+    """Create an LLMJudge instance from settings, or None if disabled."""
+    from src.config import get_settings
+    from src.llm.judge import LLMJudge
+
+    settings = get_settings()
+    if not settings.openai_api_key:
+        logger.warning("[LLM Judge] no OPENAI_API_KEY set — skipping LLM validation")
+        return None
+
+    return LLMJudge(
+        api_key=settings.openai_api_key,
+        model=settings.llm_judge_model,
+        base_url=settings.llm_judge_base_url or None,
+    )
+
+
 def cmd_reconcile(args: argparse.Namespace) -> None:
     from src.aggregator.consolidate import reconcile_all, reverse_coverage
     from src.db.client import DBClient
@@ -94,8 +111,15 @@ def cmd_reconcile(args: argparse.Namespace) -> None:
     # Ensure theme_stats have embeddings
     _generate_theme_stats_embeddings(db, embedder)
 
+    # Optional LLM judge
+    llm_judge = None
+    if args.use_llm:
+        llm_judge = _create_llm_judge()
+        if llm_judge:
+            logger.info("[reconcile] LLM judge enabled")
+
     input_rows = read_excel(args.input)
-    results = reconcile_all(input_rows, embedder, db)
+    results = reconcile_all(input_rows, embedder, db, llm_judge=llm_judge)
     reverse_rows = reverse_coverage(results, embedder, db)
     write_excel(results, args.output, also_csv=args.csv, reverse_rows=reverse_rows)
 
@@ -122,6 +146,11 @@ def main() -> None:
     p_rec.add_argument("--input", required=True)
     p_rec.add_argument("--output", default="ranking_output.xlsx")
     p_rec.add_argument("--csv", action="store_true")
+    p_rec.add_argument(
+        "--use-llm",
+        action="store_true",
+        help="Enable LLM-as-Judge to validate low-confidence matches (requires OPENAI_API_KEY)",
+    )
 
     args = parser.parse_args()
 

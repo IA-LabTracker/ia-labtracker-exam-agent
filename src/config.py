@@ -13,7 +13,8 @@ load_dotenv()
 class Settings:
     database_url: str = field(
         default_factory=lambda: os.getenv(
-            "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/exam_reconciler"
+            "DATABASE_URL",
+            "postgresql://postgres:postgres@localhost:5432/exam_reconciler",
         )
     )
     supabase_url: str = field(default_factory=lambda: os.getenv("SUPABASE_URL", ""))
@@ -41,6 +42,21 @@ class Settings:
     )
     retriever_top_k: int = field(
         default_factory=lambda: int(os.getenv("RETRIEVER_TOP_K", "5"))
+    )
+
+    # LLM Judge (optional — improves low-confidence matches)
+    llm_judge_enabled: bool = field(
+        default_factory=lambda: os.getenv("LLM_JUDGE_ENABLED", "false").lower()
+        == "true"
+    )
+    llm_judge_model: str = field(
+        default_factory=lambda: os.getenv("LLM_JUDGE_MODEL", "gpt-4o-mini")
+    )
+    llm_judge_base_url: str = field(
+        default_factory=lambda: os.getenv("LLM_JUDGE_BASE_URL", "")
+    )
+    llm_judge_threshold: float = field(
+        default_factory=lambda: float(os.getenv("LLM_JUDGE_THRESHOLD", "0.60"))
     )
 
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))

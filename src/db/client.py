@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,10 @@ class DBClient:
     def __init__(self, dsn: str | None = None):
         self._dsn = dsn or get_settings().database_url
         self._conn: psycopg.Connection | None = None
+        # Session-level caches — cleared on close()
+        self._theme_stat_cache: dict[tuple[str, str | None, str | None], dict | None] = {}
+        self._subtemas_cache: dict[tuple[str, str | None], list[dict]] = {}
+        self._all_theme_stats_cache: list[dict] | None = None
 
     def connect(self) -> DBClient:
         self._conn = psycopg.connect(self._dsn, row_factory=dict_row, autocommit=True)
@@ -31,6 +36,13 @@ class DBClient:
         if self._conn:
             self._conn.close()
             self._conn = None
+        self.clear_cache()
+
+    def clear_cache(self) -> None:
+        """Clear all session-level caches."""
+        self._theme_stat_cache.clear()
+        self._subtemas_cache.clear()
+        self._all_theme_stats_cache = None
 
     def run_migrations(self) -> None:
         sql_dir = get_settings().sql_dir
@@ -140,6 +152,10 @@ class DBClient:
     def get_theme_stat(
         self, tema: str, subtema: str | None = None, institution: str | None = None
     ) -> dict | None:
+        cache_key = (tema.lower(), (subtema or "").lower() or None, institution)
+        if cache_key in self._theme_stat_cache:
+            return self._theme_stat_cache[cache_key]
+
         if subtema:
             row = self.conn.execute(
                 "SELECT * FROM theme_stats WHERE lower(tema) = lower(%s) AND lower(subtema) = lower(%s)"
@@ -154,7 +170,9 @@ class DBClient:
                 + " LIMIT 1",
                 (tema, institution) if institution else (tema,),
             ).fetchone()
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        self._theme_stat_cache[cache_key] = result
+        return result
 
     def find_best_theme_stat(
         self, query: str, institution: str | None = None
@@ -191,6 +209,10 @@ class DBClient:
         self, tema: str, institution: str | None = None
     ) -> list[dict]:
         """Return all subtema-level entries for a given tema."""
+        cache_key = (tema.lower(), institution)
+        if cache_key in self._subtemas_cache:
+            return self._subtemas_cache[cache_key]
+
         query = (
             "SELECT * FROM theme_stats "
             "WHERE lower(tema) = lower(%s) AND subtema IS NOT NULL"
@@ -201,7 +223,9 @@ class DBClient:
             params.append(institution)
         query += " ORDER BY num_questions DESC"
         rows = self.conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+        self._subtemas_cache[cache_key] = result
+        return result
 
     def search_theme_stats_fts(self, query: str, limit: int = 10) -> list[dict]:
         rows = self.conn.execute(
@@ -250,7 +274,10 @@ class DBClient:
             return []
 
     def get_all_theme_stats(self) -> list[dict]:
+        if self._all_theme_stats_cache is not None:
+            return self._all_theme_stats_cache
         rows = self.conn.execute(
             "SELECT * FROM theme_stats ORDER BY num_questions DESC"
         ).fetchall()
-        return [dict(r) for r in rows]
+        self._all_theme_stats_cache = [dict(r) for r in rows]
+        return self._all_theme_stats_cache

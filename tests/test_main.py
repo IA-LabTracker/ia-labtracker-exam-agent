@@ -44,7 +44,9 @@ def test_reconcile_invalid_excel_returns_400(caplog, monkeypatch):
 
 
 def test_reconcile_valid_file_success(caplog, monkeypatch):
-    monkeypatch.setattr("src.main.reconcile_all", lambda rows, emb, db: [])
+    monkeypatch.setattr("src.main.reconcile_all", lambda rows, emb, db, llm_judge=None: [])
+    monkeypatch.setattr("src.main.reverse_coverage", lambda rec, emb, db: [])
+    monkeypatch.setattr("src.main._ensure_theme_stats_embeddings", lambda db, emb: None)
 
     df = pd.DataFrame({"tema": ["A", "B"]})
     buf = _make_excel(df)

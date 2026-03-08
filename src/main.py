@@ -131,9 +131,24 @@ def _ensure_theme_stats_embeddings(db: DBClient, embedder) -> None:
     logger.info("Generated embeddings for %d theme_stats entries", len(pending))
 
 
+def _create_llm_judge():
+    """Create an LLMJudge if config allows, else None."""
+    from src.llm.judge import LLMJudge
+
+    settings = get_settings()
+    if not settings.openai_api_key:
+        logger.warning("[LLM Judge] no OPENAI_API_KEY set — skipping")
+        return None
+    return LLMJudge(
+        api_key=settings.openai_api_key,
+        model=settings.llm_judge_model,
+        base_url=settings.llm_judge_base_url or None,
+    )
+
+
 @app.post("/reconcile")
-async def reconcile(file: UploadFile = File(...)):
-    logger.info("/reconcile called with file: %s", file.filename)
+async def reconcile(file: UploadFile = File(...), use_llm: bool = False):
+    logger.info("/reconcile called with file: %s (use_llm=%s)", file.filename, use_llm)
     db = get_db()
     embedder = get_embedder()
 
@@ -155,26 +170,34 @@ async def reconcile(file: UploadFile = File(...)):
         # Ensure theme_stats have embeddings
         _ensure_theme_stats_embeddings(db, embedder)
 
+        # Optional LLM judge
+        llm_judge = None
+        if use_llm:
+            llm_judge = _create_llm_judge()
+            if llm_judge:
+                logger.info("[reconcile] LLM judge enabled")
+
         logger.info("[reconcile] starting reconciliation pipeline...")
-        results = reconcile_all(input_rows, embedder, db)
+        results = reconcile_all(input_rows, embedder, db, llm_judge=llm_judge)
         logger.info(
             "[reconcile] reconciliation complete: %d rows produced", len(results)
         )
 
         logger.info("[reconcile] starting reverse coverage analysis...")
         reverse_rows = reverse_coverage(results, embedder, db)
-        logger.info(
-            "[reconcile] reverse coverage: %d rows produced", len(reverse_rows)
-        )
+        logger.info("[reconcile] reverse coverage: %d rows produced", len(reverse_rows))
 
         project_root = Path(__file__).parent.parent
+        output_dir = project_root / "tables"
+        output_dir.mkdir(exist_ok=True)
+        logger.info("[reconcile] output directory: %s", output_dir.absolute())
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_filename = f"ranking_output_{timestamp}.xlsx"
-        out_path = project_root / out_filename
+        out_path = output_dir / out_filename
 
         write_excel(results, out_path, reverse_rows=reverse_rows)
         logger.info(
-            "[reconcile] wrote output workbook to project root: %s",
+            "[reconcile] wrote output workbook to: %s",
             out_path.absolute(),
         )
 

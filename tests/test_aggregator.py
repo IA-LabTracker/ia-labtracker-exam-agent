@@ -28,6 +28,7 @@ def _make_db_mock(theme_stat=None, subtemas=None):
     db.get_theme_stat.return_value = theme_stat
     db.find_best_theme_stat.return_value = None
     db.get_subtemas_for_tema.return_value = subtemas or []
+    db.semantic_search_theme_stats.return_value = []
     return db
 
 
@@ -61,7 +62,8 @@ class TestReconcileRow:
         assert "No matches" in result.notes
 
     @patch("src.aggregator.consolidate.retrieve_candidates")
-    def test_uses_db_color_and_normalized_fields(self, mock_retrieve):
+    def test_uses_db_color_for_tema_only(self, mock_retrieve):
+        """Tema-only input matched via exact DB stat (no subtema)."""
         mock_retrieve.return_value = _mock_candidates(1)
         embedder = MagicMock()
         stat = {
@@ -69,7 +71,7 @@ class TestReconcileRow:
             "cor_hex": "#EF4444",
             "num_questions": 9,
             "tema": "Trauma",
-            "subtema": "Abordagem inicial",
+            "subtema": None,
             "institution": "FAMERP",
             "ranking": 1,
         }
@@ -80,34 +82,62 @@ class TestReconcileRow:
 
         assert result.cor_hex == "#EF4444"
         assert result.num_questions == 9
-        assert result.input_equivalencia == "Trauma | Abordagem inicial"
         assert result.normalized_tema == "Trauma"
-        assert result.normalized_subtema == "Abordagem inicial"
+        assert result.normalized_subtema is None
+        assert result.input_equivalencia == "Trauma"
 
     @patch("src.aggregator.consolidate.retrieve_candidates")
-    def test_normalized_from_stat_when_no_candidates(self, mock_retrieve):
-        """When questions DB is empty, normalized fields should come from theme_stats."""
-        mock_retrieve.return_value = []
+    def test_tema_with_subtema_match(self, mock_retrieve):
+        """When input has subtema, it should match subtema-level DB entry."""
+        mock_retrieve.return_value = _mock_candidates(1)
         embedder = MagicMock()
-        db = MagicMock()
-        db.get_theme_stat.return_value = None
-        db.find_best_theme_stat.return_value = {
+        stat = {
             "cor": "vermelho",
             "cor_hex": "#EF4444",
             "num_questions": 7,
+            "tema": "Trauma",
+            "subtema": "Abordagem inicial",
+            "institution": "FAMERP",
+            "ranking": 1,
+        }
+        db = _make_db_mock(theme_stat=stat)
+
+        row = {"tema": "Trauma", "subtema": "Abordagem inicial"}
+        result = reconcile_row(row, embedder, db)
+
+        assert result.cor_hex == "#EF4444"
+        assert result.num_questions == 7
+        assert result.normalized_subtema == "Abordagem inicial"
+        assert "Trauma | Abordagem inicial" in (result.input_equivalencia or "")
+
+    @patch("src.aggregator.consolidate.retrieve_candidates")
+    def test_fts_fallback_resolves_tema(self, mock_retrieve):
+        """When exact match fails, FTS should resolve the tema."""
+        mock_retrieve.return_value = []
+        embedder = MagicMock()
+
+        fts_stat = {
+            "num_questions": 7,
             "tema": "Infecções congênitas",
-            "subtema": "Sífilis congênita no RN",
+            "subtema": None,
             "institution": "FAMERP",
             "ranking": 9,
         }
-        db.get_subtemas_for_tema.return_value = []
+
+        db = MagicMock()
+        db.get_theme_stat.return_value = None
+        db.find_best_theme_stat.return_value = fts_stat
+        db.get_subtemas_for_tema.return_value = [
+            {"tema": "Infecções congênitas", "subtema": "Sífilis", "num_questions": 4},
+            {"tema": "Infecções congênitas", "subtema": "Toxo", "num_questions": 3},
+        ]
+        db.semantic_search_theme_stats.return_value = []
 
         row = {"tema": "Infecções Congênitas"}
         result = reconcile_row(row, embedder, db)
 
         assert result.normalized_tema == "Infecções congênitas"
-        assert result.normalized_subtema == "Sífilis congênita no RN"
-        assert result.num_questions == 7
+        assert result.match_method == "FTS"
 
     @patch("src.aggregator.consolidate.retrieve_candidates")
     def test_fallback_color_when_no_stat(self, mock_retrieve):
@@ -118,6 +148,7 @@ class TestReconcileRow:
         row = {"tema": "Test"}
         result = reconcile_row(row, embedder, db)
 
+        # 2 candidates, no stat → num_questions=2 → amarelo
         assert result.cor_hex == "#EAB308"
 
     @patch("src.aggregator.consolidate.retrieve_candidates")
@@ -155,7 +186,7 @@ class TestReconcileAll:
         assert len(results) == 5
 
     @patch("src.aggregator.consolidate.retrieve_candidates")
-    def test_sorted_by_num_questions(self, mock_retrieve):
+    def test_sorted_by_score_descending(self, mock_retrieve):
         mock_retrieve.return_value = _mock_candidates(1)
         embedder = MagicMock()
         db = _make_db_mock()
@@ -163,5 +194,5 @@ class TestReconcileAll:
         rows = [{"tema": f"Topic {i}"} for i in range(3)]
         results = reconcile_all(rows, embedder, db)
 
-        counts = [r.num_questions for r in results]
-        assert counts == sorted(counts, reverse=True)
+        scores = [r.match_score for r in results]
+        assert scores == sorted(scores, reverse=True)

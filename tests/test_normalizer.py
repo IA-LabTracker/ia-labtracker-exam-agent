@@ -92,6 +92,7 @@ class TestClassifyColor:
         assert cor == "verde"
         assert cor_hex == "#22C55E"
 
-    def test_zero_is_verde(self):
-        cor, _ = classify_color(0)
-        assert cor == "verde"
+    def test_zero_is_azul(self):
+        cor, cor_hex = classify_color(0)
+        assert cor == "azul"
+        assert cor_hex == "#3B82F6"

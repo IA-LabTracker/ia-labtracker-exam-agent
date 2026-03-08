@@ -24,7 +24,13 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\(''src/main.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''src/exporters/excel_writer.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
       "Bash(python -c \"import numpy; print\\(''numpy OK''\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\(''src/aggregator/consolidate.py''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''src/aggregator/consolidate.py''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(python -m pytest tests/test_main.py tests/test_normalizer.py -v)",
+      "Bash(python -m pytest tests/test_main.py tests/test_normalizer.py tests/test_retriever.py -v)"
+    ],
+    "additionalDirectories": [
+      "c:\\projetos\\ia-labtracker-exam-agent\\src"
     ]
   }
 }
