@@ -4,9 +4,9 @@ import logging
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    level=logging.INFO,
+    level=logging.DEBUG,
 )
 
 logger = logging.getLogger("exam_reconciler")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 logger.propagate = True

@@ -5,6 +5,37 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# Fixed institution list — order determines column order in the exported spreadsheet
+INSTITUTIONS: list[str] = [
+    "AMP-PR",
+    "AMRIGS",
+    "CERMAM",
+    "FAMENE",
+    "FAMERP",
+    "FELUMA",
+    "HCPA",
+    "HEVV - HOSPITAL EVANGÉLICO DE VILA VELHA",
+    "HIAE",
+    "IAMSPE",
+    "INTO RJ",
+    "PSU - MG",
+    "PSU – GO",
+    "REVALIDA INEP",
+    "SCMSP",
+    "SES-DF",
+    "SES-PE",
+    "SIRIO",
+    "SUS BA",
+    "SUS SP",
+    "UEPA",
+    "UERJ",
+    "UNESP",
+    "UNICAMP",
+    "UNIFESP",
+    "USP RP",
+    "USP SP",
+]
+
 MATCH_EXACT = "exato"
 MATCH_FTS = "FTS"
 MATCH_SEMANTIC = "semântico"
@@ -57,10 +88,12 @@ class ReconciledRow:
     input_equivalencia: str | None
     normalized_tema: str
     normalized_subtema: str | None
-    num_questions: int
+    # {institution: num_questions} — one entry per university; missing institutions → 0
+    questions_by_institution: dict[str, int]
     match_method: str = MATCH_NONE
     match_score: float = 0.0
     match_label: str = "⚪ Sem match"
+    # Row-level color derived from the SUM of all institutions
     cor_hex: str = "#22C55E"
     notes: str = ""
 

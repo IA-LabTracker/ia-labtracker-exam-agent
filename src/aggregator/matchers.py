@@ -308,7 +308,9 @@ def retry_low_score(
     if not stat:
         return None
 
-    _, cor_hex = classify_color(num_q)
+    qbi = db.get_questions_by_institution(best_tema)
+    total_q = sum(qbi.values()) if qbi else num_q
+    _, cor_hex = classify_color(total_q)
     info = MatchInfo(
         MATCH_SEMANTIC,
         best_score,
@@ -321,7 +323,7 @@ def retry_low_score(
         input_equivalencia=equivalencia,
         normalized_tema=best_tema,
         normalized_subtema=original.normalized_subtema,
-        num_questions=num_q,
+        questions_by_institution=qbi,
         match_method=info.method,
         match_score=info.score,
         match_label=info.label,

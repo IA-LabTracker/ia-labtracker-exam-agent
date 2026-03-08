@@ -102,7 +102,6 @@ def reconcile_row(
 
     # --- Comparison #2: subtema vs subtema (or tema-only stat) ---
     stat: dict | None = None
-    num_questions = 0
     if resolved_tema:
         if has_subtema:
             stat, match_info = find_stat_with_subtema(
@@ -114,18 +113,14 @@ def reconcile_row(
                 embedder,
                 tema_match,
             )
-            if stat:
-                num_questions = stat["num_questions"]
         else:
-            stat, num_questions = find_stat_tema_only(resolved_tema, db)
+            stat, _ = find_stat_tema_only(resolved_tema, db)
 
     notes_parts = []
     equivalencia_out = equivalencia
     final_subtema = norm_subtema
 
     if stat:
-        _, cor_hex = classify_color(num_questions)
-
         stat_subtema = stat.get("subtema")
         if stat_subtema:
             final_subtema = stat_subtema
@@ -149,14 +144,23 @@ def reconcile_row(
             f"(ranking #{stat.get('ranking', '?')})"
         )
         logger.debug(
-            "[reconcile_row] matched: tema='%s' subtema='%s' num=%d",
+            "[reconcile_row] matched: tema='%s' subtema='%s'",
             final_tema,
             stat_subtema,
-            num_questions,
         )
+
+    # --- Fetch per-institution question counts from theme_stats_all ---
+    if resolved_tema or stat:
+        lookup_tema = final_tema
+        lookup_subtema = final_subtema if has_subtema else None
+        questions_by_institution = db.get_questions_by_institution(lookup_tema, lookup_subtema)
     else:
-        num_questions = num_candidates
-        _, cor_hex = classify_color(num_questions)
+        questions_by_institution = {}
+
+    total_questions = sum(questions_by_institution.values()) if questions_by_institution else num_candidates
+    _, cor_hex = classify_color(total_questions)
+
+    if not stat:
         notes_parts.append("No matches found in DB")
 
     if not candidates and not stat:
@@ -175,7 +179,7 @@ def reconcile_row(
         input_equivalencia=equivalencia_out,
         normalized_tema=final_tema,
         normalized_subtema=final_subtema if has_subtema else None,
-        num_questions=num_questions,
+        questions_by_institution=questions_by_institution,
         match_method=match_info.method,
         match_score=match_info.score,
         match_label=match_info.label

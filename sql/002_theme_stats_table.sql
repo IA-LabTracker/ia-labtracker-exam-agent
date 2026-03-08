@@ -19,6 +19,9 @@ CREATE INDEX IF NOT EXISTS idx_theme_stats_tema ON theme_stats(tema);
 CREATE INDEX IF NOT EXISTS idx_theme_stats_cor ON theme_stats(cor);
 
 ALTER TABLE theme_stats
+ADD COLUMN IF NOT EXISTS cor_hex TEXT NOT NULL DEFAULT '#22C55E';
+
+ALTER TABLE theme_stats
 ADD COLUMN IF NOT EXISTS fts tsvector GENERATED ALWAYS AS (
     to_tsvector(
         'portuguese',

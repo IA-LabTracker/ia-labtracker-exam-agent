@@ -6,15 +6,19 @@ from pathlib import Path
 import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-from src.aggregator.models import ReconciledRow, ReverseRow
+from src.aggregator.models import INSTITUTIONS, ReconciledRow, ReverseRow
+from src.normalize.normalizer import classify_color
 from src.utils.logging import logger
+
+# Column key for each institution: "q_FAMERP", "q_USP", etc.
+_INST_COLS = [f"q_{inst}" for inst in INSTITUTIONS]
 
 COLUMNS = [
     "input_tema",
     "input_equivalencia",
     "normalized_tema",
     "normalized_subtema",
-    "num_questions",
+    *_INST_COLS,
     "match_label",
     "match_score",
     "notes",
@@ -25,7 +29,7 @@ COLUMN_HEADERS = {
     "input_equivalencia": "Equivalência",
     "normalized_tema": "Tema",
     "normalized_subtema": "Subtema",
-    "num_questions": "Qtd. Questões",
+    **{f"q_{inst}": inst for inst in INSTITUTIONS},
     "match_label": "Confiança",
     "match_score": "Score",
     "notes": "Observações",
@@ -123,11 +127,16 @@ def write_excel(
     output_path = Path(output_path)
     records = []
     cor_hex_list = []
+    # Per-row per-institution counts for independent badge coloring
+    inst_counts_list: list[dict[str, int]] = []
     for r in rows:
         d = asdict(r)
         cor_hex_list.append(d.pop("cor_hex", "#22C55E"))
         d.pop("match_method", None)
-        d["num_questions"] = f"{d['num_questions']} questões"
+        qbi: dict[str, int] = d.pop("questions_by_institution", {})
+        inst_counts_list.append(qbi)
+        for inst in INSTITUTIONS:
+            d[f"q_{inst}"] = f"{qbi.get(inst, 0)} questões"
         d["match_score"] = f"{d.get('match_score', 0):.0%}"
         records.append(d)
 
@@ -152,7 +161,7 @@ def write_excel(
 
         # Style directly on the writer's workbook (avoids save → load → save)
         wb = writer.book
-        _style_ranking_sheet(wb["Ranking"], df, cor_hex_list)
+        _style_ranking_sheet(wb["Ranking"], df, cor_hex_list, inst_counts_list)
         if reverse_rows and "Cobertura Reversa" in wb.sheetnames:
             _style_reverse_sheet(wb["Cobertura Reversa"], reverse_rows)
 
@@ -166,16 +175,22 @@ def write_excel(
     return output_path
 
 
-def _style_ranking_sheet(ws, df: pd.DataFrame, cor_hex_list: list[str]) -> None:
+def _style_ranking_sheet(
+    ws,
+    df: pd.DataFrame,
+    cor_hex_list: list[str],
+    inst_counts_list: list[dict[str, int]],
+) -> None:
     num_cols = ws.max_column
     num_rows = ws.max_row
 
     # Track column widths during styling (eliminates second pass)
     col_max_len = [0] * (num_cols + 1)
 
+    col_names = list(df.columns)
     for col_idx in range(1, num_cols + 1):
         cell = ws.cell(row=1, column=col_idx)
-        col_name = df.columns[col_idx - 1] if col_idx <= len(df.columns) else ""
+        col_name = col_names[col_idx - 1] if col_idx <= len(col_names) else ""
         cell.value = COLUMN_HEADERS.get(col_name, cell.value)
         cell.fill = _HEADER_FILL
         cell.font = _HEADER_FONT
@@ -184,28 +199,25 @@ def _style_ranking_sheet(ws, df: pd.DataFrame, cor_hex_list: list[str]) -> None:
         if cell.value:
             col_max_len[col_idx] = len(str(cell.value))
 
-    num_q_col = (
-        (list(df.columns).index("num_questions") + 1)
-        if "num_questions" in df.columns
-        else None
-    )
+    # Map institution column key → (col_index, institution_name)
+    inst_col_indices: dict[str, int] = {}
+    for inst in INSTITUTIONS:
+        col_key = f"q_{inst}"
+        if col_key in col_names:
+            inst_col_indices[inst] = col_names.index(col_key) + 1
+
     confidence_col = (
-        (list(df.columns).index("match_label") + 1)
-        if "match_label" in df.columns
-        else None
+        (col_names.index("match_label") + 1) if "match_label" in col_names else None
     )
     score_col = (
-        (list(df.columns).index("match_score") + 1)
-        if "match_score" in df.columns
-        else None
+        (col_names.index("match_score") + 1) if "match_score" in col_names else None
     )
 
     for row_idx in range(2, num_rows + 1):
-        hex_value = (
-            cor_hex_list[row_idx - 2] if (row_idx - 2) < len(cor_hex_list) else None
-        )
+        data_idx = row_idx - 2
+        hex_value = cor_hex_list[data_idx] if data_idx < len(cor_hex_list) else None
         row_argb = ROW_COLORS.get(hex_value) if hex_value else None
-        badge = BADGE_COLORS.get(hex_value) if hex_value else None
+        qbi = inst_counts_list[data_idx] if data_idx < len(inst_counts_list) else {}
 
         for col_idx in range(1, num_cols + 1):
             cell = ws.cell(row=row_idx, column=col_idx)
@@ -217,9 +229,18 @@ def _style_ranking_sheet(ws, df: pd.DataFrame, cor_hex_list: list[str]) -> None:
             if cell.value:
                 col_max_len[col_idx] = max(col_max_len[col_idx], len(str(cell.value)))
 
-            if col_idx == num_q_col and badge:
-                cell.fill = _get_fill(badge[0])
-                cell.font = _BADGE_FONT_CACHE.get(hex_value, _BOLD_FONT)
+            # Check if this is an institution question column
+            inst_for_col = next(
+                (inst for inst, cidx in inst_col_indices.items() if cidx == col_idx),
+                None,
+            )
+            if inst_for_col is not None:
+                count = qbi.get(inst_for_col, 0)
+                _, inst_hex = classify_color(count)
+                inst_badge = BADGE_COLORS.get(inst_hex)
+                if inst_badge:
+                    cell.fill = _get_fill(inst_badge[0])
+                    cell.font = _BADGE_FONT_CACHE.get(inst_hex, _BOLD_FONT)
             elif col_idx == confidence_col or col_idx == score_col:
                 val = str(cell.value or "")
                 if "Quente" in val or col_idx == score_col:

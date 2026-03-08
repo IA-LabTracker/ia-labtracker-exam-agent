@@ -161,13 +161,13 @@ def apply_llm_judge(
         r = results[idx]
 
         if verdict.is_equivalent and verdict.confidence > r.match_score:
-            # LLM confirmed the current match with higher confidence
+            # LLM confirmed the current match with higher confidence — preserve existing per-institution counts
             results[idx] = ReconciledRow(
                 input_tema=r.input_tema,
                 input_equivalencia=r.input_equivalencia,
                 normalized_tema=r.normalized_tema,
                 normalized_subtema=r.normalized_subtema,
-                num_questions=r.num_questions,
+                questions_by_institution=r.questions_by_institution,
                 match_method=MATCH_LLM,
                 match_score=verdict.confidence,
                 match_label=_classify_temperature(MATCH_LLM, verdict.confidence),
@@ -193,18 +193,19 @@ def apply_llm_judge(
                     stat = db.find_best_theme_stat(suggested)
 
             if stat:
-                num_q = stat["num_questions"]
-                _, cor_hex = classify_color(num_q)
                 suggested_tema = stat["tema"]
                 suggested_subtema = stat.get("subtema")
                 equiv = f"{suggested_tema} | {suggested_subtema}" if suggested_subtema else suggested_tema
+                qbi = db.get_questions_by_institution(suggested_tema, suggested_subtema)
+                total_q = sum(qbi.values()) if qbi else 0
+                _, cor_hex = classify_color(total_q)
 
                 results[idx] = ReconciledRow(
                     input_tema=r.input_tema,
                     input_equivalencia=equiv,
                     normalized_tema=suggested_tema,
                     normalized_subtema=suggested_subtema or r.normalized_subtema,
-                    num_questions=num_q,
+                    questions_by_institution=qbi,
                     match_method=MATCH_LLM,
                     match_score=verdict.confidence,
                     match_label=_classify_temperature(MATCH_LLM, verdict.confidence),

@@ -22,6 +22,7 @@ class DBClient:
         self._all_theme_stats_cache: list[dict] | None = None
         self._fts_cache: dict[tuple[str, str | None], dict | None] = {}
         self._semantic_cache: dict[tuple[str, int], list[dict]] = {}
+        self._inst_questions_cache: dict[tuple[str, str | None], dict[str, int]] = {}
 
     def connect(self) -> DBClient:
         self._conn = psycopg.connect(self._dsn, row_factory=dict_row, autocommit=True)
@@ -47,6 +48,7 @@ class DBClient:
         self._all_theme_stats_cache = None
         self._fts_cache.clear()
         self._semantic_cache.clear()
+        self._inst_questions_cache.clear()
 
     def run_migrations(self) -> None:
         sql_dir = get_settings().sql_dir
@@ -291,6 +293,41 @@ class DBClient:
         except Exception as exc:
             logger.error("[semantic_search_theme_stats] error: %s", exc, exc_info=True)
             return []
+
+    def get_questions_by_institution(
+        self, tema: str, subtema: str | None = None
+    ) -> dict[str, int]:
+        """Query theme_stats_all and return {institution: num_questions} for the given tema/subtema.
+
+        When subtema is provided, matches exactly. When None, aggregates all subtemas per institution.
+        A single query fetches all institutions at once for performance.
+        """
+        cache_key = (tema.lower(), (subtema or "").lower() or None)
+        if cache_key in self._inst_questions_cache:
+            return self._inst_questions_cache[cache_key]
+
+        if subtema:
+            rows = self.conn.execute(
+                "SELECT institution, num_questions FROM theme_stats_all "
+                "WHERE lower(tema) = lower(%s) AND lower(subtema) = lower(%s)",
+                (tema, subtema),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT institution, SUM(num_questions) AS num_questions FROM theme_stats_all "
+                "WHERE lower(tema) = lower(%s) GROUP BY institution",
+                (tema,),
+            ).fetchall()
+
+        result: dict[str, int] = {r["institution"]: int(r["num_questions"]) for r in rows}
+        self._inst_questions_cache[cache_key] = result
+        logger.debug(
+            "[get_questions_by_institution] tema='%s' subtema='%s' → %s",
+            tema,
+            subtema or "(none)",
+            result,
+        )
+        return result
 
     def get_all_theme_stats(self) -> list[dict]:
         if self._all_theme_stats_cache is not None:

@@ -29,7 +29,9 @@
       "Bash(python -m pytest tests/test_main.py tests/test_normalizer.py -v)",
       "Bash(python -m pytest tests/test_main.py tests/test_normalizer.py tests/test_retriever.py -v)",
       "Bash(python -m pytest tests/ -x -q)",
-      "Bash(python -m pytest tests/ -q --ignore=tests/test_aggregator.py)"
+      "Bash(python -m pytest tests/ -q --ignore=tests/test_aggregator.py)",
+      "Bash(python -m pytest tests/test_aggregator.py -v)",
+      "Bash(python -m pytest -v)"
     ],
     "additionalDirectories": [
       "c:\\projetos\\ia-labtracker-exam-agent\\src"

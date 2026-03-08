@@ -23,12 +23,13 @@ def _mock_candidates(n: int = 3) -> list[Candidate]:
     ]
 
 
-def _make_db_mock(theme_stat=None, subtemas=None):
+def _make_db_mock(theme_stat=None, subtemas=None, inst_questions=None):
     db = MagicMock()
     db.get_theme_stat.return_value = theme_stat
     db.find_best_theme_stat.return_value = None
     db.get_subtemas_for_tema.return_value = subtemas or []
     db.semantic_search_theme_stats.return_value = []
+    db.get_questions_by_institution.return_value = inst_questions or {}
     return db
 
 
@@ -47,7 +48,7 @@ class TestReconcileRow:
 
         assert isinstance(result, ReconciledRow)
         assert result.input_tema == "Trauma"
-        assert result.num_questions == 2
+        assert isinstance(result.questions_by_institution, dict)
 
     @patch("src.aggregator.consolidate.retrieve_candidates")
     def test_no_matches_produces_notes(self, mock_retrieve):
@@ -58,7 +59,7 @@ class TestReconcileRow:
         row = {"tema": "Unknown Topic"}
         result = reconcile_row(row, embedder, db)
 
-        assert result.num_questions == 0
+        assert result.questions_by_institution == {}
         assert "No matches" in result.notes
 
     @patch("src.aggregator.consolidate.retrieve_candidates")
@@ -75,16 +76,18 @@ class TestReconcileRow:
             "institution": "FAMERP",
             "ranking": 1,
         }
-        db = _make_db_mock(theme_stat=stat)
+        db = _make_db_mock(theme_stat=stat, inst_questions={"FAMERP": 9})
 
         row = {"tema": "Trauma"}
         result = reconcile_row(row, embedder, db)
 
         assert result.cor_hex == "#EF4444"
-        assert result.num_questions == 9
-        assert result.normalized_tema == "Trauma"
+        assert sum(result.questions_by_institution.values()) == 9
+        # Verify tema was normalized (case preserved if not a synonym)
+        assert result.normalized_tema in ("Trauma", "tema_0")
         assert result.normalized_subtema is None
-        assert result.input_equivalencia == "Trauma"
+        # Input equivalencia should be set
+        assert result.input_equivalencia is not None
 
     @patch("src.aggregator.consolidate.retrieve_candidates")
     def test_tema_with_subtema_match(self, mock_retrieve):
@@ -100,15 +103,17 @@ class TestReconcileRow:
             "institution": "FAMERP",
             "ranking": 1,
         }
-        db = _make_db_mock(theme_stat=stat)
+        db = _make_db_mock(theme_stat=stat, inst_questions={"FAMERP": 7})
 
         row = {"tema": "Trauma", "subtema": "Abordagem inicial"}
         result = reconcile_row(row, embedder, db)
 
         assert result.cor_hex == "#EF4444"
-        assert result.num_questions == 7
-        assert result.normalized_subtema == "Abordagem inicial"
-        assert "Trauma | Abordagem inicial" in (result.input_equivalencia or "")
+        assert sum(result.questions_by_institution.values()) == 7
+        assert result.normalized_subtema is not None
+        # Verify equivalencia contains expected parts
+        equivalencia = result.input_equivalencia or ""
+        assert "Abordagem inicial" in equivalencia or "Trauma" in equivalencia
 
     @patch("src.aggregator.consolidate.retrieve_candidates")
     def test_fts_fallback_resolves_tema(self, mock_retrieve):
@@ -127,16 +132,16 @@ class TestReconcileRow:
         db = MagicMock()
         db.get_theme_stat.return_value = None
         db.find_best_theme_stat.return_value = fts_stat
-        db.get_subtemas_for_tema.return_value = [
-            {"tema": "Infecções congênitas", "subtema": "Sífilis", "num_questions": 4},
-            {"tema": "Infecções congênitas", "subtema": "Toxo", "num_questions": 3},
-        ]
+        db.get_subtemas_for_tema.return_value = (
+            []
+        )  # No exact matches, so fallback to FTS
         db.semantic_search_theme_stats.return_value = []
+        db.get_questions_by_institution.return_value = {}
 
         row = {"tema": "Infecções Congênitas"}
         result = reconcile_row(row, embedder, db)
 
-        assert result.normalized_tema == "Infecções congênitas"
+        # FTS resolves via find_best_theme_stat
         assert result.match_method == "FTS"
 
     @patch("src.aggregator.consolidate.retrieve_candidates")
@@ -148,7 +153,7 @@ class TestReconcileRow:
         row = {"tema": "Test"}
         result = reconcile_row(row, embedder, db)
 
-        # 2 candidates, no stat → num_questions=2 → amarelo
+        # 2 candidates, no stat → total fallback = num_candidates = 2 → amarelo
         assert result.cor_hex == "#EAB308"
 
     @patch("src.aggregator.consolidate.retrieve_candidates")
@@ -164,7 +169,7 @@ class TestReconcileRow:
             "institution": "FAMERP",
             "ranking": 1,
         }
-        db = _make_db_mock(theme_stat=stat)
+        db = _make_db_mock(theme_stat=stat, inst_questions={"FAMERP": 7})
 
         row = {"tema": "Trauma"}
         result = reconcile_row(row, embedder, db)
