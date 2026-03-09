@@ -51,12 +51,21 @@ Regras:
 6. Se um candidato alternativo for MELHOR que o match atual, sugira-o em "suggested_match"
 7. Se o match atual estiver correto, retorne is_equivalent=true e suggested_match=null
 8. Se nenhum candidato for bom, retorne is_equivalent=false e suggested_match=null
+9. PREFIRA SEMPRE o candidato MAIS ESPECIFICO: se o INPUT mencionar um subtopico especifico \
+(ex: "Inflamatorio", "Obstrutivo", "Cardiogenico", "Hipoglicemia"), escolha o candidato cujo subtema \
+melhor corresponda a essa especificidade. Evite "Aspectos Gerais" quando existir um candidato mais especifico disponivel.
+10. O valor de "suggested_match" DEVE ser copiado EXATAMENTE do texto de um dos candidatos listados \
+(incluindo "tema | subtema" com a mesma grafia). NAO invente texto novo.
 
 Exemplos:
 - INPUT "Avaliacao do RN | Triagem Neonatal" + candidato "Triagem neonatal | Teste do Coracaozinho" → EQUIVALENTES
 - INPUT "Trauma | Abordagem Inicial" + candidato "Politraumatizado | Atendimento Inicial" → EQUIVALENTES
 - INPUT "Pneumonia" + candidato "DPOC" → NAO EQUIVALENTES (doencas distintas)
 - INPUT "Queimaduras" (Cirurgia) + candidato "Queimaduras" (Dermatologia) → NAO EQUIVALENTES
+- INPUT "Abdome agudo Inflamatorio | Apendicite" + candidatos ["Abdome agudo | Aspectos Gerais", \
+"Abdome agudo | Apendicite aguda"] → PREFIRA "Abdome agudo | Apendicite aguda" (mais especifico)
+- INPUT "Choque | Choque Cardiogenico" + candidatos ["Cardiointensivismo | Choque (exceto choque septico)", \
+"Cardiointensivismo | Aspectos Gerais"] → PREFIRA "Cardiointensivismo | Choque (exceto choque septico)"
 
 Responda SEMPRE em JSON valido:
 {
@@ -65,7 +74,7 @@ Responda SEMPRE em JSON valido:
       "index": 0,
       "is_equivalent": true/false,
       "confidence": 0.0-1.0,
-      "suggested_match": "tema | subtema do banco que e melhor match, ou null",
+      "suggested_match": "tema | subtema EXATAMENTE como listado nos candidatos, ou null",
       "reasoning": "Explicacao curta do por que (1-2 frases)"
     }
   ]

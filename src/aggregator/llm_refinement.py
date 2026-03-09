@@ -74,9 +74,11 @@ def _search_alternative_candidates(
 
     # Strategy 3: Search subtemas for the top 3 candidate temas only (was: all 10).
     # get_subtemas_for_tema is cached, so repeated calls for the same tema are free.
+    # Fetch up to 5 subtemas (instead of 3) so the LLM sees more specific options
+    # beyond generic "Aspectos Gerais" entries that rank high by question count.
     for c in list(candidates)[:3]:
         subtemas = db.get_subtemas_for_tema(c["tema"])
-        for s in subtemas[:3]:  # top 3 subtemas by num_questions
+        for s in subtemas[:5]:  # top 5 subtemas by num_questions
             _add(s)
 
     # Strategy 4: If current match tema differs from input, search around it too
@@ -173,19 +175,34 @@ def apply_llm_judge(
             # LLM confirmed the current match — always upgrade method to LLM.
             # Use the higher of LLM confidence and current score so the row never regresses.
             new_score = max(verdict.confidence, r.match_score)
-            # Derive equivalencia from resolved data if not already set
+
+            # Ensure normalized_subtema comes from theme_stats, not from input normalization.
+            # When the initial match found a stat, normalized_subtema is already the DB value.
+            # When no stat was found (low-confidence), normalized_subtema may be the input's
+            # normalized subtema — look up the DB to get the canonical value.
+            confirmed_subtema = r.normalized_subtema
+            if r.normalized_tema:
+                db_stat = db.get_theme_stat(r.normalized_tema, r.normalized_subtema)
+                if not db_stat and r.normalized_subtema:
+                    # subtema not in DB as-is — fall back to tema-only lookup
+                    db_stat = db.get_theme_stat(r.normalized_tema, None)
+                if db_stat:
+                    confirmed_subtema = db_stat.get("subtema")  # canonical DB value (may be None)
+
+            # Derive equivalencia from DB-confirmed data
             confirmed_equiv = r.input_equivalencia
             if not confirmed_equiv and r.normalized_tema:
                 confirmed_equiv = (
-                    f"{r.normalized_tema} | {r.normalized_subtema}"
-                    if r.normalized_subtema
+                    f"{r.normalized_tema} | {confirmed_subtema}"
+                    if confirmed_subtema
                     else r.normalized_tema
                 )
+
             results[idx] = ReconciledRow(
                 input_tema=r.input_tema,
                 input_equivalencia=confirmed_equiv,
                 normalized_tema=r.normalized_tema,
-                normalized_subtema=r.normalized_subtema,
+                normalized_subtema=confirmed_subtema,
                 questions_by_institution=r.questions_by_institution,
                 match_method=MATCH_LLM,
                 match_score=new_score,
@@ -227,7 +244,7 @@ def apply_llm_judge(
                     input_tema=r.input_tema,
                     input_equivalencia=equiv,
                     normalized_tema=suggested_tema,
-                    normalized_subtema=suggested_subtema or r.normalized_subtema,
+                    normalized_subtema=suggested_subtema,  # None when tema-only DB entry; never fall back to input subtema
                     questions_by_institution=qbi,
                     match_method=MATCH_LLM,
                     match_score=verdict.confidence,
