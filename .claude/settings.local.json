@@ -31,7 +31,8 @@
       "Bash(python -m pytest tests/ -x -q)",
       "Bash(python -m pytest tests/ -q --ignore=tests/test_aggregator.py)",
       "Bash(python -m pytest tests/test_aggregator.py -v)",
-      "Bash(python -m pytest -v)"
+      "Bash(python -m pytest -v)",
+      "Bash(python -c \":*)"
     ],
     "additionalDirectories": [
       "c:\\projetos\\ia-labtracker-exam-agent\\src"

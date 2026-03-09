@@ -57,7 +57,9 @@ def _search_alternative_candidates(
     embeddings = embedder.embed_batch(search_queries)
     for q, emb in zip(search_queries, embeddings):
         results = db.semantic_search_theme_stats(
-            query_embedding=emb, query_text=q, top_k=5,
+            query_embedding=emb,
+            query_text=q,
+            top_k=5,
         )
         for r in results:
             _add(r)
@@ -70,8 +72,9 @@ def _search_alternative_candidates(
         if stat:
             _add(stat)
 
-    # Strategy 3: Also search subtemas under potential tema matches
-    for c in list(candidates):
+    # Strategy 3: Search subtemas for the top 3 candidate temas only (was: all 10).
+    # get_subtemas_for_tema is cached, so repeated calls for the same tema are free.
+    for c in list(candidates)[:3]:
         subtemas = db.get_subtemas_for_tema(c["tema"])
         for s in subtemas[:3]:  # top 3 subtemas by num_questions
             _add(s)
@@ -105,7 +108,9 @@ def apply_llm_judge(
     candidates_list = []
 
     for i, r in enumerate(results):
-        if r.match_method == MATCH_NONE or r.match_score >= threshold:
+        # Skip only rows that already have a good match (above threshold)
+        # MATCH_NONE rows should also be reviewed so the LLM can try to find something
+        if r.match_score >= threshold and r.match_method != MATCH_NONE:
             continue
         review_indices.append(i)
 
@@ -129,7 +134,11 @@ def apply_llm_judge(
         # Search DB independently for real alternative candidates
         if embedder:
             db_candidates = _search_alternative_candidates(
-                input_tema, input_subtema, r.normalized_tema, embedder, db,
+                input_tema,
+                input_subtema,
+                r.normalized_tema,
+                embedder,
+                db,
             )
         else:
             # Fallback: use FTS + subtemas if no embedder available
@@ -195,7 +204,11 @@ def apply_llm_judge(
             if stat:
                 suggested_tema = stat["tema"]
                 suggested_subtema = stat.get("subtema")
-                equiv = f"{suggested_tema} | {suggested_subtema}" if suggested_subtema else suggested_tema
+                equiv = (
+                    f"{suggested_tema} | {suggested_subtema}"
+                    if suggested_subtema
+                    else suggested_tema
+                )
                 qbi = db.get_questions_by_institution(suggested_tema, suggested_subtema)
                 total_q = sum(qbi.values()) if qbi else 0
                 _, cor_hex = classify_color(total_q)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from typing import Any
 
 import psycopg
@@ -14,6 +15,11 @@ class DBClient:
     def __init__(self, dsn: str | None = None):
         self._dsn = dsn or get_settings().database_url
         self._conn: psycopg.Connection | None = None
+        # Reentrant lock — serialises actual DB network calls across threads.
+        # Cache reads are lock-free (GIL-safe in CPython); the lock is only
+        # acquired when a real self.conn.execute() is about to happen, using
+        # the double-checked locking pattern so cached results bypass it.
+        self._lock = threading.RLock()
         # Session-level caches — cleared on close()
         self._theme_stat_cache: dict[
             tuple[str, str | None, str | None], dict | None
@@ -162,22 +168,25 @@ class DBClient:
         if cache_key in self._theme_stat_cache:
             return self._theme_stat_cache[cache_key]
 
-        if subtema:
-            row = self.conn.execute(
-                "SELECT * FROM theme_stats WHERE lower(tema) = lower(%s) AND lower(subtema) = lower(%s)"
-                + (" AND institution = %s" if institution else "")
-                + " LIMIT 1",
-                (tema, subtema, institution) if institution else (tema, subtema),
-            ).fetchone()
-        else:
-            row = self.conn.execute(
-                "SELECT * FROM theme_stats WHERE lower(tema) = lower(%s) AND subtema IS NULL"
-                + (" AND institution = %s" if institution else "")
-                + " LIMIT 1",
-                (tema, institution) if institution else (tema,),
-            ).fetchone()
-        result = dict(row) if row else None
-        self._theme_stat_cache[cache_key] = result
+        with self._lock:
+            if cache_key in self._theme_stat_cache:  # double-check after lock
+                return self._theme_stat_cache[cache_key]
+            if subtema:
+                row = self.conn.execute(
+                    "SELECT * FROM theme_stats WHERE lower(tema) = lower(%s) AND lower(subtema) = lower(%s)"
+                    + (" AND institution = %s" if institution else "")
+                    + " LIMIT 1",
+                    (tema, subtema, institution) if institution else (tema, subtema),
+                ).fetchone()
+            else:
+                row = self.conn.execute(
+                    "SELECT * FROM theme_stats WHERE lower(tema) = lower(%s) AND subtema IS NULL"
+                    + (" AND institution = %s" if institution else "")
+                    + " LIMIT 1",
+                    (tema, institution) if institution else (tema,),
+                ).fetchone()
+            result = dict(row) if row else None
+            self._theme_stat_cache[cache_key] = result
         return result
 
     def find_best_theme_stat(
@@ -192,31 +201,35 @@ class DBClient:
         if cache_key in self._fts_cache:
             return self._fts_cache[cache_key]
 
-        if "|" in query:
-            parts = [p.strip() for p in query.split("|", 1)]
-            exact = self.get_theme_stat(parts[0], parts[1], institution)
+        with self._lock:
+            if cache_key in self._fts_cache:  # double-check after lock
+                return self._fts_cache[cache_key]
+
+            if "|" in query:
+                parts = [p.strip() for p in query.split("|", 1)]
+                exact = self.get_theme_stat(parts[0], parts[1], institution)
+                if exact:
+                    self._fts_cache[cache_key] = exact
+                    return exact
+
+            exact = self.get_theme_stat(query, None, institution)
             if exact:
                 self._fts_cache[cache_key] = exact
                 return exact
 
-        exact = self.get_theme_stat(query, None, institution)
-        if exact:
-            self._fts_cache[cache_key] = exact
-            return exact
+            base_query = (
+                "SELECT * FROM theme_stats "
+                "WHERE fts @@ plainto_tsquery('portuguese', %s)"
+            )
+            params: list = [query]
+            if institution:
+                base_query += " AND institution = %s"
+                params.append(institution)
+            base_query += " ORDER BY num_questions DESC LIMIT 1"
 
-        base_query = (
-            "SELECT * FROM theme_stats "
-            "WHERE fts @@ plainto_tsquery('portuguese', %s)"
-        )
-        params: list = [query]
-        if institution:
-            base_query += " AND institution = %s"
-            params.append(institution)
-        base_query += " ORDER BY num_questions DESC LIMIT 1"
-
-        row = self.conn.execute(base_query, params).fetchone()
-        result = dict(row) if row else None
-        self._fts_cache[cache_key] = result
+            row = self.conn.execute(base_query, params).fetchone()
+            result = dict(row) if row else None
+            self._fts_cache[cache_key] = result
         return result
 
     def get_subtemas_for_tema(
@@ -227,18 +240,21 @@ class DBClient:
         if cache_key in self._subtemas_cache:
             return self._subtemas_cache[cache_key]
 
-        query = (
-            "SELECT * FROM theme_stats "
-            "WHERE lower(tema) = lower(%s) AND subtema IS NOT NULL"
-        )
-        params: list = [tema]
-        if institution:
-            query += " AND institution = %s"
-            params.append(institution)
-        query += " ORDER BY num_questions DESC"
-        rows = self.conn.execute(query, params).fetchall()
-        result = [dict(r) for r in rows]
-        self._subtemas_cache[cache_key] = result
+        with self._lock:
+            if cache_key in self._subtemas_cache:  # double-check after lock
+                return self._subtemas_cache[cache_key]
+            query = (
+                "SELECT * FROM theme_stats "
+                "WHERE lower(tema) = lower(%s) AND subtema IS NOT NULL"
+            )
+            params: list = [tema]
+            if institution:
+                query += " AND institution = %s"
+                params.append(institution)
+            query += " ORDER BY num_questions DESC"
+            rows = self.conn.execute(query, params).fetchall()
+            result = [dict(r) for r in rows]
+            self._subtemas_cache[cache_key] = result
         return result
 
     def search_theme_stats_fts(self, query: str, limit: int = 10) -> list[dict]:
@@ -276,64 +292,115 @@ class DBClient:
         if cache_key in self._semantic_cache:
             return self._semantic_cache[cache_key]
 
-        logger.debug(
-            "[semantic_search_theme_stats] query_text='%s' top_k=%d",
-            query_text[:100],
-            top_k,
-        )
+        with self._lock:
+            if cache_key in self._semantic_cache:  # double-check after lock
+                return self._semantic_cache[cache_key]
+            logger.debug(
+                "[semantic_search_theme_stats] query_text='%s' top_k=%d",
+                query_text[:100],
+                top_k,
+            )
+            try:
+                rows = self.conn.execute(
+                    "SELECT * FROM semantic_search_theme_stats(%s::vector, %s, %s, %s, %s)",
+                    (str(query_embedding), query_text, top_k, alpha, beta),
+                ).fetchall()
+                logger.debug("[semantic_search_theme_stats] returned %d rows", len(rows))
+                result = [dict(r) for r in rows]
+                self._semantic_cache[cache_key] = result
+            except Exception as exc:
+                logger.error("[semantic_search_theme_stats] error: %s", exc, exc_info=True)
+                result = []
+                self._semantic_cache[cache_key] = result
+        return result
+
+    def _fetch_inst_counts(
+        self, table: str, tema: str, subtema: str | None
+    ) -> list[dict]:
+        """Fetch per-institution question counts from a given table/view by exact tema match."""
         try:
-            rows = self.conn.execute(
-                "SELECT * FROM semantic_search_theme_stats(%s::vector, %s, %s, %s, %s)",
-                (str(query_embedding), query_text, top_k, alpha, beta),
-            ).fetchall()
-            logger.debug("[semantic_search_theme_stats] returned %d rows", len(rows))
-            result = [dict(r) for r in rows]
-            self._semantic_cache[cache_key] = result
-            return result
+            if subtema:
+                rows = self.conn.execute(
+                    f"SELECT institution, num_questions FROM {table} "
+                    "WHERE lower(tema) = lower(%s) AND lower(subtema) = lower(%s)",
+                    (tema, subtema),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    f"SELECT institution, SUM(num_questions) AS num_questions FROM {table} "
+                    "WHERE lower(tema) = lower(%s) GROUP BY institution",
+                    (tema,),
+                ).fetchall()
+            return [dict(r) for r in rows]
         except Exception as exc:
-            logger.error("[semantic_search_theme_stats] error: %s", exc, exc_info=True)
+            logger.warning("[_fetch_inst_counts] error querying %s: %s", table, exc)
             return []
 
     def get_questions_by_institution(
         self, tema: str, subtema: str | None = None
     ) -> dict[str, int]:
-        """Query theme_stats_all and return {institution: num_questions} for the given tema/subtema.
+        """Return {institution: num_questions} for the given tema/subtema.
 
-        When subtema is provided, matches exactly. When None, aggregates all subtemas per institution.
-        A single query fetches all institutions at once for performance.
+        Query order:
+          1. theme_stats_all — canonical aggregated view (preferred)
+          2. theme_stats     — fallback if view returns nothing
+          3. theme_stats FTS — fallback when exact tema name doesn't match (different institutions
+                               may name the same topic differently)
         """
         cache_key = (tema.lower(), (subtema or "").lower() or None)
         if cache_key in self._inst_questions_cache:
             return self._inst_questions_cache[cache_key]
 
-        if subtema:
-            rows = self.conn.execute(
-                "SELECT institution, num_questions FROM theme_stats_all "
-                "WHERE lower(tema) = lower(%s) AND lower(subtema) = lower(%s)",
-                (tema, subtema),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT institution, SUM(num_questions) AS num_questions FROM theme_stats_all "
-                "WHERE lower(tema) = lower(%s) GROUP BY institution",
-                (tema,),
-            ).fetchall()
+        with self._lock:
+            if cache_key in self._inst_questions_cache:  # double-check after lock
+                return self._inst_questions_cache[cache_key]
 
-        result: dict[str, int] = {r["institution"]: int(r["num_questions"]) for r in rows}
-        self._inst_questions_cache[cache_key] = result
-        logger.debug(
-            "[get_questions_by_institution] tema='%s' subtema='%s' → %s",
-            tema,
-            subtema or "(none)",
-            result,
-        )
+            # 1. Try theme_stats_all (canonical view)
+            rows = self._fetch_inst_counts("theme_stats_all", tema, subtema)
+
+            # 2. Fallback: theme_stats directly
+            if not rows:
+                rows = self._fetch_inst_counts("theme_stats", tema, subtema)
+
+            # 3. Fallback: FTS on theme_stats — handles topic name variations across institutions
+            if not rows and not subtema:
+                try:
+                    fts_rows = self.conn.execute(
+                        "SELECT institution, SUM(num_questions) AS num_questions "
+                        "FROM theme_stats "
+                        "WHERE fts @@ plainto_tsquery('portuguese', %s) "
+                        "GROUP BY institution",
+                        (tema,),
+                    ).fetchall()
+                    rows = [dict(r) for r in fts_rows]
+                    if rows:
+                        logger.debug(
+                            "[get_questions_by_institution] FTS fallback found %d institutions for tema='%s'",
+                            len(rows),
+                            tema,
+                        )
+                except Exception as exc:
+                    logger.warning("[get_questions_by_institution] FTS fallback failed: %s", exc)
+
+            result: dict[str, int] = {r["institution"]: int(r["num_questions"]) for r in rows}
+            self._inst_questions_cache[cache_key] = result
+            logger.debug(
+                "[get_questions_by_institution] tema='%s' subtema='%s' → %d institutions: %s",
+                tema,
+                subtema or "(none)",
+                len(result),
+                list(result.keys()),
+            )
         return result
 
     def get_all_theme_stats(self) -> list[dict]:
         if self._all_theme_stats_cache is not None:
             return self._all_theme_stats_cache
-        rows = self.conn.execute(
-            "SELECT * FROM theme_stats ORDER BY num_questions DESC"
-        ).fetchall()
-        self._all_theme_stats_cache = [dict(r) for r in rows]
+        with self._lock:
+            if self._all_theme_stats_cache is not None:  # double-check after lock
+                return self._all_theme_stats_cache
+            rows = self.conn.execute(
+                "SELECT * FROM theme_stats ORDER BY num_questions DESC"
+            ).fetchall()
+            self._all_theme_stats_cache = [dict(r) for r in rows]
         return self._all_theme_stats_cache

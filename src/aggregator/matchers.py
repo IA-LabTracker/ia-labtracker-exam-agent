@@ -204,7 +204,9 @@ def find_stat_with_subtema(
             info = MatchInfo(MATCH_FTS, score, _classify_temperature(MATCH_FTS, score))
             return stat, info
 
-    # Semantic fallback — multiple subtema-only query strategies via embeddings
+    # Semantic fallback — capped at 3 query variants to avoid DB query explosion.
+    # Full query + subtema alone + one focused variant (normalized form or longest keyword).
+    # Batch-embedded in one call; DB queries run only until a good score is found.
     if embedder and subtema_raw:
         semantic_queries = [
             f"{resolved_tema} {subtema_raw}",
@@ -212,14 +214,18 @@ def find_stat_with_subtema(
         ]
         if norm_subtema and norm_subtema != subtema_raw:
             semantic_queries.append(norm_subtema)
-        words = [w for w in subtema_raw.split() if len(w) > 3]
-        for w in words:
-            semantic_queries.append(f"{resolved_tema} {w}")
+        else:
+            # Use the longest keyword as a targeted fallback (one word, not all words)
+            words = sorted(
+                [w for w in subtema_raw.split() if len(w) > 3], key=len, reverse=True
+            )
+            if words:
+                semantic_queries.append(f"{resolved_tema} {words[0]}")
 
         best_result = None
         best_score = 0.0
 
-        # Batch embed all queries at once for speed
+        # Batch embed all queries at once (single model call)
         embeddings = embedder.embed_batch(semantic_queries)
 
         for query, embedding in zip(semantic_queries, embeddings):
@@ -236,6 +242,9 @@ def find_stat_with_subtema(
                     if score > best_score and score >= 0.35:
                         best_result = r
                         best_score = score
+            # Early exit: already found a strong match — skip remaining queries
+            if best_score >= MIN_ACCEPTABLE_SCORE:
+                break
 
         if best_result:
             logger.debug(

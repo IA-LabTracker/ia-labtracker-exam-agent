@@ -9,22 +9,25 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from src.aggregator.models import INSTITUTIONS, ReconciledRow, ReverseRow
 from src.normalize.normalizer import classify_color
 from src.utils.logging import logger
+from src.utils.manchester_order import lookup_semana, format_semana, SEMANA_UNKNOWN, POS_UNKNOWN
 
 # Column key for each institution: "q_FAMERP", "q_USP", etc.
 _INST_COLS = [f"q_{inst}" for inst in INSTITUTIONS]
 
 COLUMNS = [
+    "semana",
+    "match_label",
+    "match_score",
     "input_tema",
     "input_equivalencia",
     "normalized_tema",
     "normalized_subtema",
     *_INST_COLS,
-    "match_label",
-    "match_score",
     "notes",
 ]
 
 COLUMN_HEADERS = {
+    "semana": "Semana",
     "input_tema": "Tema (entrada)",
     "input_equivalencia": "Equivalência",
     "normalized_tema": "Tema",
@@ -98,6 +101,7 @@ _HEADER_FILL = PatternFill(
 _HEADER_FONT = Font(color="00FFFFFF", bold=True, size=11)
 _DATA_FONT = Font(size=11, color="00000000")
 _BOLD_FONT = Font(size=11, bold=True, color="00000000")
+_ROW_FILL = PatternFill(start_color="00EFF6FF", end_color="00EFF6FF", fill_type="solid")
 
 # Pre-build fill objects for each color (avoid creating per cell)
 _FILL_CACHE: dict[str, PatternFill] = {}
@@ -125,20 +129,51 @@ def write_excel(
     reverse_rows: list[ReverseRow] | None = None,
 ) -> Path:
     output_path = Path(output_path)
-    records = []
-    cor_hex_list = []
-    # Per-row per-institution counts for independent badge coloring
-    inst_counts_list: list[dict[str, int]] = []
+
+    # Build (record, cor_hex, qbi, sort_key) tuples so we can sort by Manchester order
+    raw_entries: list[tuple[dict, str, dict, tuple[int, int]]] = []
+    # Pre-build case-insensitive lookup: lower(inst) → canonical inst name
+    _inst_lower: dict[str, str] = {inst.lower(): inst for inst in INSTITUTIONS}
+
     for r in rows:
         d = asdict(r)
-        cor_hex_list.append(d.pop("cor_hex", "#22C55E"))
+        cor_hex = d.pop("cor_hex", "#22C55E")
         d.pop("match_method", None)
-        qbi: dict[str, int] = d.pop("questions_by_institution", {})
-        inst_counts_list.append(qbi)
+        qbi_raw: dict[str, int] = d.pop("questions_by_institution", {})
+
+        # Normalize institution names from DB to canonical INSTITUTIONS list
+        # (handles case differences, e.g. "amp-pr" → "AMP-PR")
+        qbi: dict[str, int] = {}
+        for db_name, count in qbi_raw.items():
+            canonical = _inst_lower.get(db_name.lower(), db_name)
+            qbi[canonical] = qbi.get(canonical, 0) + count
+
         for inst in INSTITUTIONS:
             d[f"q_{inst}"] = f"{qbi.get(inst, 0)} questões"
         d["match_score"] = f"{d.get('match_score', 0):.0%}"
-        records.append(d)
+
+        # Derive input tema/subtema for Manchester lookup
+        input_parts = (d.get("input_tema") or "").split(" | ", 1)
+        input_tema_raw = input_parts[0].strip()
+        input_subtema_raw = input_parts[1].strip() if len(input_parts) > 1 else None
+
+        sort_key = lookup_semana(
+            d.get("normalized_tema"),
+            d.get("normalized_subtema"),
+            input_tema_raw,
+            input_subtema_raw,
+        )
+        semana_int = sort_key[0]
+        d["semana"] = format_semana(semana_int)
+
+        raw_entries.append((d, cor_hex, qbi, sort_key))
+
+    # Sort by (semana, row_position) — rows without a Manchester match go last
+    raw_entries.sort(key=lambda e: e[3])
+
+    records = [e[0] for e in raw_entries]
+    cor_hex_list = [e[1] for e in raw_entries]
+    inst_counts_list = [e[2] for e in raw_entries]
 
     df = pd.DataFrame(records)
     df = df[[c for c in COLUMNS if c in df.columns]]
@@ -199,12 +234,14 @@ def _style_ranking_sheet(
         if cell.value:
             col_max_len[col_idx] = len(str(cell.value))
 
-    # Map institution column key → (col_index, institution_name)
+    # Map institution column key → col_index, and reverse for O(1) per-cell lookup
     inst_col_indices: dict[str, int] = {}
     for inst in INSTITUTIONS:
         col_key = f"q_{inst}"
         if col_key in col_names:
             inst_col_indices[inst] = col_names.index(col_key) + 1
+    # Reversed: col_idx → inst — avoids O(27) linear scan inside the cell loop
+    col_idx_to_inst: dict[int, str] = {cidx: inst for inst, cidx in inst_col_indices.items()}
 
     confidence_col = (
         (col_names.index("match_label") + 1) if "match_label" in col_names else None
@@ -215,8 +252,6 @@ def _style_ranking_sheet(
 
     for row_idx in range(2, num_rows + 1):
         data_idx = row_idx - 2
-        hex_value = cor_hex_list[data_idx] if data_idx < len(cor_hex_list) else None
-        row_argb = ROW_COLORS.get(hex_value) if hex_value else None
         qbi = inst_counts_list[data_idx] if data_idx < len(inst_counts_list) else {}
 
         for col_idx in range(1, num_cols + 1):
@@ -229,11 +264,8 @@ def _style_ranking_sheet(
             if cell.value:
                 col_max_len[col_idx] = max(col_max_len[col_idx], len(str(cell.value)))
 
-            # Check if this is an institution question column
-            inst_for_col = next(
-                (inst for inst, cidx in inst_col_indices.items() if cidx == col_idx),
-                None,
-            )
+            # Institution question cells keep their colored badges
+            inst_for_col = col_idx_to_inst.get(col_idx)
             if inst_for_col is not None:
                 count = qbi.get(inst_for_col, 0)
                 _, inst_hex = classify_color(count)
@@ -241,13 +273,11 @@ def _style_ranking_sheet(
                 if inst_badge:
                     cell.fill = _get_fill(inst_badge[0])
                     cell.font = _BADGE_FONT_CACHE.get(inst_hex, _BOLD_FONT)
-            elif col_idx == confidence_col or col_idx == score_col:
-                val = str(cell.value or "")
-                if "Quente" in val or col_idx == score_col:
+            else:
+                # All other cells get a uniform light blue for readability
+                cell.fill = _ROW_FILL
+                if col_idx == confidence_col or col_idx == score_col:
                     cell.font = _BOLD_FONT
-                _apply_confidence_fill(cell, val, row_argb)
-            elif row_argb:
-                cell.fill = _get_fill(row_argb)
 
     ws.row_dimensions[1].height = 30
     for row_idx in range(2, num_rows + 1):
@@ -295,7 +325,6 @@ def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
         rr_idx = row_idx - 2
         rr = reverse_rows[rr_idx] if rr_idx < len(reverse_rows) else None
         hex_value = rr.db_cor_hex if rr else None
-        row_argb = ROW_COLORS.get(hex_value) if hex_value else None
         badge = BADGE_COLORS.get(hex_value) if hex_value else None
 
         for col_idx in range(1, num_cols + 1):
@@ -309,19 +338,20 @@ def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
                 col_max_len[col_idx] = max(col_max_len[col_idx], len(str(cell.value)))
 
             if col_idx == num_q_col and badge:
+                # Question count cell keeps its colored badge
                 cell.fill = _get_fill(badge[0])
                 cell.font = _BADGE_FONT_CACHE.get(hex_value, _BOLD_FONT)
             elif col_idx == status_col and rr:
+                # Coverage status keeps its semantic color (coberto/parcial/não coberto)
                 cov_color = COVERAGE_COLORS.get(rr.coverage_status)
                 if cov_color:
                     cell.fill = _get_fill(cov_color)
                 cell.font = _BOLD_FONT
-            elif col_idx == sim_col and rr:
-                cell.font = _BOLD_FONT
-                if row_argb:
-                    cell.fill = _get_fill(row_argb)
-            elif row_argb:
-                cell.fill = _get_fill(row_argb)
+            else:
+                # All other cells get uniform light blue
+                cell.fill = _ROW_FILL
+                if col_idx == sim_col:
+                    cell.font = _BOLD_FONT
 
     ws.row_dimensions[1].height = 30
     for row_idx in range(2, num_rows + 1):
@@ -335,11 +365,3 @@ def _style_reverse_sheet(ws, reverse_rows: list[ReverseRow]) -> None:
         )
 
 
-def _apply_confidence_fill(cell, label_value: str, fallback_argb: str | None) -> None:
-    """Color the confidence cell based on its temperature label."""
-    for keyword, argb in CONFIDENCE_FILLS.items():
-        if keyword in label_value:
-            cell.fill = _get_fill(argb)
-            return
-    if fallback_argb:
-        cell.fill = _get_fill(fallback_argb)

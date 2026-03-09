@@ -88,7 +88,9 @@ def _build_batch_prompt(
         seen = set()
         # Include current match as first candidate
         if current_match:
-            cand_lines.append(f"  * [MATCH ATUAL] {current_match} (score={current_score:.0%})")
+            cand_lines.append(
+                f"  * [MATCH ATUAL] {current_match} (score={current_score:.0%})"
+            )
             seen.add(current_match.lower())
 
         for c in candidates[:10]:
@@ -186,13 +188,11 @@ class LLMJudge:
             parsed = json.loads(content)
             results = parsed.get("results", [])
 
+            # Build index dict once — O(1) per item instead of O(n) linear scan
+            results_by_index = {r.get("index"): r for r in results}
             verdicts = []
             for item_idx in range(len(items)):
-                # Find the result for this index
-                result = next(
-                    (r for r in results if r.get("index") == item_idx),
-                    None,
-                )
+                result = results_by_index.get(item_idx)
                 if result:
                     verdicts.append(
                         LLMVerdict(

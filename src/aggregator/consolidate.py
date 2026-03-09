@@ -8,6 +8,8 @@ Split into focused modules:
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
@@ -104,7 +106,7 @@ def reconcile_row(
     stat: dict | None = None
     if resolved_tema:
         if has_subtema:
-            stat, match_info = find_stat_with_subtema(
+            stat, sub_match = find_stat_with_subtema(
                 resolved_tema,
                 subtema_raw,
                 norm_subtema,
@@ -113,6 +115,9 @@ def reconcile_row(
                 embedder,
                 tema_match,
             )
+            if stat:
+                match_info = sub_match
+            # If subtema not found, keep match_info from tema resolution (don't reset to MATCH_NONE)
         else:
             stat, _ = find_stat_tema_only(resolved_tema, db)
 
@@ -148,23 +153,34 @@ def reconcile_row(
             final_tema,
             stat_subtema,
         )
+    elif resolved_tema:
+        # Tema was found in DB but subtema didn't match — build equivalência from what was resolved
+        equivalencia_out = resolved_tema
 
     # --- Fetch per-institution question counts from theme_stats_all ---
     if resolved_tema or stat:
         lookup_tema = final_tema
         lookup_subtema = final_subtema if has_subtema else None
-        questions_by_institution = db.get_questions_by_institution(lookup_tema, lookup_subtema)
+        questions_by_institution = db.get_questions_by_institution(
+            lookup_tema, lookup_subtema
+        )
     else:
         questions_by_institution = {}
 
-    total_questions = sum(questions_by_institution.values()) if questions_by_institution else num_candidates
+    total_questions = (
+        sum(questions_by_institution.values())
+        if questions_by_institution
+        else num_candidates
+    )
     _, cor_hex = classify_color(total_questions)
 
-    if not stat:
-        notes_parts.append("No matches found in DB")
+    if not stat and not resolved_tema:
+        notes_parts.append("Nenhum match encontrado na base de dados")
+    elif not stat and resolved_tema:
+        notes_parts.append(f"Tema resolvido: {resolved_tema} (sem estatísticas de subtema)")
 
     if not candidates and not stat:
-        notes_parts.append("No matches found in questions DB")
+        notes_parts.append("Nenhum candidato encontrado na busca")
     elif best_candidate:
         notes_parts.append(
             f"Best match: {best_candidate.tema_normalized or '?'}"
@@ -189,54 +205,86 @@ def reconcile_row(
     )
 
 
+_MAX_WORKERS = min(8, (os.cpu_count() or 2) + 2)
+
+
 def reconcile_all(
     input_rows: list[dict[str, Any]],
     embedder: BaseEmbedder,
     db: DBClient,
     llm_judge: LLMJudge | None = None,
 ) -> list[ReconciledRow]:
-    """Reconcile every input row 1:1. No dedup — every input line produces one output line."""
-    logger.info(
-        "[reconcile_all] starting reconciliation of %d input rows", len(input_rows)
-    )
-    results = []
-    for i, row in enumerate(input_rows, start=1):
-        if i % 50 == 0 or i == 1:
-            logger.info("[reconcile_all] processing row %d / %d", i, len(input_rows))
-        try:
-            result = reconcile_row(row, embedder, db)
-            results.append(result)
-        except Exception as exc:
-            logger.error(
-                "[reconcile_all] error on row %d / %d (tema='%s'): %s",
-                i,
-                len(input_rows),
-                row.get("tema", "(unknown)")[:50],
-                exc,
-                exc_info=True,
-            )
-            raise
+    """Reconcile every input row 1:1. No dedup — every input line produces one output line.
 
-    # Retry rows with low scores using alternative queries
-    for i, r in enumerate(results):
-        if r.match_score < MIN_ACCEPTABLE_SCORE and r.match_method != MATCH_NONE:
-            retried = retry_low_score(input_rows[i], r, embedder, db)
-            if retried and retried.match_score > r.match_score:
-                logger.info(
-                    "[reconcile_all] retry improved row %d: %.0f%% -> %.0f%%",
+    Rows are processed concurrently via ThreadPoolExecutor. Each worker shares
+    the same DB connection (protected by DBClient._lock) and embedder cache,
+    so embedding API calls — the main bottleneck — run in true parallel while
+    DB round-trips are serialised automatically.
+    """
+    n = len(input_rows)
+    logger.info("[reconcile_all] starting reconciliation of %d input rows (workers=%d)", n, _MAX_WORKERS)
+
+    results: list[ReconciledRow | None] = [None] * n
+
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+        future_to_idx = {
+            executor.submit(reconcile_row, row, embedder, db): i
+            for i, row in enumerate(input_rows)
+        }
+        completed = 0
+        for future in as_completed(future_to_idx):
+            i = future_to_idx[future]
+            completed += 1
+            if completed % 50 == 0 or completed == 1:
+                logger.info("[reconcile_all] completed %d / %d", completed, n)
+            try:
+                results[i] = future.result()
+            except Exception as exc:
+                logger.error(
+                    "[reconcile_all] error on row %d / %d (tema='%s'): %s",
                     i + 1,
-                    r.match_score * 100,
-                    retried.match_score * 100,
+                    n,
+                    input_rows[i].get("tema", "(unknown)")[:50],
+                    exc,
+                    exc_info=True,
                 )
-                results[i] = retried
+                raise
+
+    # Retry rows with low scores — also parallelised
+    retry_candidates = [
+        i for i, r in enumerate(results) if r is not None and r.match_score < MIN_ACCEPTABLE_SCORE
+    ]
+    if retry_candidates:
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+            future_to_idx = {
+                executor.submit(retry_low_score, input_rows[i], results[i], embedder, db): i
+                for i in retry_candidates
+            }
+            for future in as_completed(future_to_idx):
+                i = future_to_idx[future]
+                try:
+                    retried = future.result()
+                    if retried and retried.match_score > results[i].match_score:
+                        logger.info(
+                            "[reconcile_all] retry improved row %d: %.0f%% -> %.0f%%",
+                            i + 1,
+                            results[i].match_score * 100,
+                            retried.match_score * 100,
+                        )
+                        results[i] = retried
+                except Exception as exc:
+                    logger.warning("[reconcile_all] retry failed for row %d: %s", i + 1, exc)
+
+    # All rows should be populated after parallel processing (exceptions re-raised above)
+    final_results: list[ReconciledRow] = [r for r in results if r is not None]
 
     # Optional LLM judge step — validate/improve low-confidence matches
     if llm_judge is not None:
         from src.config import get_settings
 
         settings = get_settings()
-        results = apply_llm_judge(
-            results,
+        final_results = apply_llm_judge(
+            final_results,
             llm_judge,
             db,
             threshold=settings.llm_judge_threshold,
@@ -244,13 +292,13 @@ def reconcile_all(
         )
 
     # Sort by score descending (highest confidence first) — NO dedup
-    results.sort(key=lambda r: r.match_score, reverse=True)
+    final_results.sort(key=lambda r: r.match_score, reverse=True)
     logger.info(
         "[reconcile_all] reconciliation complete: %d rows in -> %d rows out",
         len(input_rows),
-        len(results),
+        len(final_results),
     )
-    return results
+    return final_results
 
 
 # ---------------------------------------------------------------------------
