@@ -84,7 +84,7 @@ def _search_alternative_candidates(
     # Strategy 4: If current match tema differs from input, search around it too
     if current_match_tema.lower() != input_tema.lower():
         subtemas = db.get_subtemas_for_tema(current_match_tema)
-        for s in subtemas[:3]:
+        for s in subtemas[:5]:
             _add(s)
 
     return candidates[:10]  # Cap at 10 to keep prompt reasonable
@@ -187,7 +187,9 @@ def apply_llm_judge(
                     # subtema not in DB as-is — fall back to tema-only lookup
                     db_stat = db.get_theme_stat(r.normalized_tema, None)
                 if db_stat:
-                    confirmed_subtema = db_stat.get("subtema")  # canonical DB value (may be None)
+                    confirmed_subtema = db_stat.get(
+                        "subtema"
+                    )  # canonical DB value (may be None)
 
             # Derive equivalencia from DB-confirmed data
             confirmed_equiv = r.input_equivalencia
@@ -213,8 +215,12 @@ def apply_llm_judge(
             improved += 1
 
         elif not verdict.is_equivalent and verdict.suggested_match:
-            # LLM found a better match — look it up in DB
-            suggested = verdict.suggested_match
+            # LLM found a better match — look it up in DB.
+            # Clean the raw string first: LLMs sometimes include prompt annotations
+            # like "[MATCH ATUAL]" prefixes or "(N questoes)" suffixes.
+            from src.llm.judge import _clean_suggested_match
+
+            suggested = _clean_suggested_match(verdict.suggested_match)
             # Try exact match first, then check if it's a "tema | subtema" format
             stat = None
             if " | " in suggested:
@@ -253,6 +259,12 @@ def apply_llm_judge(
                     notes=f"Match anterior: {r.input_equivalencia or r.normalized_tema} (score={r.match_score:.0%}); LLM sugeriu: {equiv}; {verdict.reasoning}",
                 )
                 improved += 1
+            else:
+                logger.warning(
+                    "[LLM Judge] suggested_match %r not found in DB for input %r — keeping original row",
+                    suggested,
+                    r.input_tema,
+                )
 
     logger.info("[LLM Judge] improved %d / %d reviewed rows", improved, len(items))
     return results

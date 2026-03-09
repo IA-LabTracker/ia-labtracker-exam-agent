@@ -37,7 +37,8 @@
       "Bash(python3 -c \":*)",
       "WebSearch",
       "WebFetch(domain:platform.openai.com)",
-      "Read(//c/Users/Patrick/.claude/projects/c--projetos-ia-labtracker-exam-agent/memory/**)"
+      "Read(//c/Users/Patrick/.claude/projects/c--projetos-ia-labtracker-exam-agent/memory/**)",
+      "Bash(python -W ignore -c \":*)"
     ],
     "additionalDirectories": [
       "c:\\projetos\\ia-labtracker-exam-agent\\src"

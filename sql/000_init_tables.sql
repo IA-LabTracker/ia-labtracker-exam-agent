@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS questions (
     raw_text TEXT NOT NULL,
     tema_normalized TEXT,
     subtema_normalized TEXT,
-    embedding vector(384),
+    embedding vector(768),
     source_file TEXT,
     content_hash TEXT UNIQUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()

@@ -1,6 +1,6 @@
 -- Add embedding column to theme_stats for semantic search
 ALTER TABLE theme_stats
-ADD COLUMN IF NOT EXISTS embedding vector(384);
+ADD COLUMN IF NOT EXISTS embedding vector(768);
 
 -- Create vector index for cosine similarity search on theme_stats
 CREATE INDEX IF NOT EXISTS idx_theme_stats_embedding
@@ -8,7 +8,7 @@ CREATE INDEX IF NOT EXISTS idx_theme_stats_embedding
 
 -- Function: semantic search on theme_stats
 CREATE OR REPLACE FUNCTION semantic_search_theme_stats(
-    query_embedding vector(384),
+    query_embedding vector(768),
     query_text text,
     match_count int DEFAULT 5,
     alpha double precision DEFAULT 0.7,

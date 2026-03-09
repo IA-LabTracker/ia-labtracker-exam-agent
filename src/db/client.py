@@ -287,10 +287,11 @@ class DBClient:
             return
         with self._lock:
             with self.conn.transaction():
-                self.conn.executemany(
-                    "UPDATE theme_stats SET embedding = %s::vector WHERE id = %s",
-                    [(str(emb), stat_id) for stat_id, emb in updates],
-                )
+                with self.conn.cursor() as cur:
+                    cur.executemany(
+                        "UPDATE theme_stats SET embedding = %s::vector WHERE id = %s",
+                        [(str(emb), stat_id) for stat_id, emb in updates],
+                    )
 
     def semantic_search_theme_stats(
         self,

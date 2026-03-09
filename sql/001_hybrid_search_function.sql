@@ -1,5 +1,5 @@
 CREATE OR REPLACE FUNCTION hybrid_search(
-    query_embedding vector(384),
+    query_embedding vector(768),
     query_text text,
     match_count int DEFAULT 5,
     alpha double precision DEFAULT 0.7,

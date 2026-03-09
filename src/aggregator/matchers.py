@@ -95,7 +95,7 @@ def _semantic_resolve_tema(
     query: str,
     db: DBClient,
     embedder: BaseEmbedder,
-    threshold: float = 0.4,
+    threshold: float = 0.50,
 ) -> tuple[str | None, float]:
     """Use embedding similarity on theme_stats to find the best match.
 
@@ -239,7 +239,7 @@ def find_stat_with_subtema(
                     "subtema"
                 ):
                     score = r.get("hybrid_score", 0) or 0
-                    if score > best_score and score >= 0.35:
+                    if score > best_score and score >= 0.45:
                         best_result = r
                         best_score = score
             # Early exit: already found a strong match — skip remaining queries
@@ -247,15 +247,23 @@ def find_stat_with_subtema(
                 break
 
         if best_result:
+            # Cap the subtema semantic score at the tema resolution score.
+            # Without this, a wrong tema resolved at 44% whose subtema happens to
+            # score 66% would produce a misleadingly high final confidence (66%)
+            # that bypasses the LLM judge threshold.  The overall match cannot be
+            # more confident than the weakest link (tema resolution).
+            capped_score = min(best_score, base.score) if base.score > 0 else best_score
             logger.debug(
-                "[find_stat_with_subtema] semantic match subtema='%s' score=%.3f",
+                "[find_stat_with_subtema] semantic match subtema='%s' raw_score=%.3f capped=%.3f (base=%.3f)",
                 best_result["subtema"],
                 best_score,
+                capped_score,
+                base.score,
             )
             info = MatchInfo(
                 MATCH_SEMANTIC,
-                best_score,
-                _classify_temperature(MATCH_SEMANTIC, best_score),
+                capped_score,
+                _classify_temperature(MATCH_SEMANTIC, capped_score),
             )
             return best_result, info
 

@@ -56,16 +56,35 @@ Regras:
 melhor corresponda a essa especificidade. Evite "Aspectos Gerais" quando existir um candidato mais especifico disponivel.
 10. O valor de "suggested_match" DEVE ser copiado EXATAMENTE do texto de um dos candidatos listados \
 (incluindo "tema | subtema" com a mesma grafia). NAO invente texto novo.
+11. NAO considere equivalentes temas que apenas pertencem a mesma grande area medica, mas representam \
+doencas ou conteudos diferentes. Se o INPUT contem uma doenca especifica (ex: pneumonia, apendicite, meningite), \
+o candidato deve mencionar a MESMA doenca ou um sinonimo direto — nao aceite outras doencas da mesma especialidade.
+12. NAO marque como equivalente quando o INPUT e sobre trauma/patologia especifica e o candidato e sobre \
+organizacao/politica de saude (e vice-versa). Ex: "Trauma cranioencefalico" NAO e equivalente a \
+"Semiologia | Exame fisico e neuroanatomia".
 
-Exemplos:
+Exemplos de EQUIVALENCIA (aceitar):
 - INPUT "Avaliacao do RN | Triagem Neonatal" + candidato "Triagem neonatal | Teste do Coracaozinho" → EQUIVALENTES
 - INPUT "Trauma | Abordagem Inicial" + candidato "Politraumatizado | Atendimento Inicial" → EQUIVALENTES
-- INPUT "Pneumonia" + candidato "DPOC" → NAO EQUIVALENTES (doencas distintas)
-- INPUT "Queimaduras" (Cirurgia) + candidato "Queimaduras" (Dermatologia) → NAO EQUIVALENTES
 - INPUT "Abdome agudo Inflamatorio | Apendicite" + candidatos ["Abdome agudo | Aspectos Gerais", \
 "Abdome agudo | Apendicite aguda"] → PREFIRA "Abdome agudo | Apendicite aguda" (mais especifico)
 - INPUT "Choque | Choque Cardiogenico" + candidatos ["Cardiointensivismo | Choque (exceto choque septico)", \
 "Cardiointensivismo | Aspectos Gerais"] → PREFIRA "Cardiointensivismo | Choque (exceto choque septico)"
+
+Exemplos de NAO EQUIVALENCIA (rejeitar — erros comuns a evitar):
+- INPUT "Pneumonia" + candidato "DPOC" → NAO EQUIVALENTES (doencas distintas)
+- INPUT "Queimaduras" (Cirurgia) + candidato "Queimaduras" (Dermatologia) → NAO EQUIVALENTES (especialidades diferentes)
+- INPUT "Atendimento inicial ao politraumatizado | Vias Aereas" + candidato \
+"Politica nacional de atencao basica | Atribuicoes das equipes" → NAO EQUIVALENTES (trauma cirurgico != politica de saude)
+- INPUT "Pneumonia | Covid" + candidato "Infeccoes respiratorias agudas | Coqueluche" → NAO EQUIVALENTES (doencas distintas)
+- INPUT "Pneumonia | Abscesso Pulmonar" + candidato "Infeccoes respiratorias agudas | Sinusite bacteriana aguda" \
+→ NAO EQUIVALENTES (orgaos e doencas diferentes)
+- INPUT "Avaliacao do Recem-nascido | Dermatoses do RN" + candidato "Alojamento conjunto" \
+→ NAO EQUIVALENTES (dermatologia neonatal != organizacao da assistencia)
+- INPUT "Avaliacao neurologica | Trauma cranioencefalico" + candidato "Semiologia | Exame fisico e neuroanatomia" \
+→ NAO EQUIVALENTES (TCE e patologia traumatica especifica, nao exame clinico geral)
+- INPUT "Atendimento ao paciente queimado | Reposicao volemica" + candidato "Queimadura | Aspectos Gerais" \
+→ NAO EQUIVALENTES quando existir candidato especifico de reposicao volemica
 
 Responda SEMPRE em JSON valido:
 {
@@ -79,6 +98,32 @@ Responda SEMPRE em JSON valido:
     }
   ]
 }"""
+
+
+def _clean_suggested_match(raw: str) -> str:
+    """Strip prompt annotations from LLM-returned suggested_match.
+
+    The candidate list shown to the LLM includes prefixes like '[MATCH ATUAL]'
+    and suffixes like '(8 questoes)' or '(score=45%)'.  If the LLM copies one
+    of those strings literally, the DB lookup will fail silently.  This
+    function strips only known prompt annotations so that real DB names that
+    contain parentheses (e.g. "Choque (exceto choque séptico)") are preserved.
+    """
+    import re
+
+    s = raw.strip()
+    # Remove leading markers: "* [MATCH ATUAL] ", "- ", "* " etc.
+    s = re.sub(r"^[\*\-]\s*\[MATCH ATUAL\]\s*", "", s)
+    s = re.sub(r"^[\*\-]\s*", "", s)
+    # Remove ONLY known prompt-generated suffixes at end of string:
+    #   (N questoes)            – question count annotation
+    #   (score=N%)              – score annotation
+    #   (sem match automatico)  – no-match annotation
+    # These patterns are unambiguous and never appear in real DB names.
+    s = re.sub(r"\s*\(\d+\s+questoes?\)\s*$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*\(score=\d+%\)\s*$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*\(sem match[^)]*\)\s*$", "", s, flags=re.IGNORECASE)
+    return s.strip()
 
 
 def _build_batch_prompt(
@@ -95,10 +140,16 @@ def _build_batch_prompt(
 
         cand_lines = []
         seen = set()
-        # Include current match as first candidate
+        # Include current match as first candidate.
+        # Show "(sem match automático)" when score=0 so the LLM doesn't
+        # interpret it as "a match exists but with zero confidence".
         if current_match:
+            if current_score > 0:
+                score_str = f"score={current_score:.0%}"
+            else:
+                score_str = "sem match automatico"
             cand_lines.append(
-                f"  * [MATCH ATUAL] {current_match} (score={current_score:.0%})"
+                f"  * [MATCH ATUAL] {current_match} ({score_str})"
             )
             seen.add(current_match.lower())
 
@@ -111,12 +162,16 @@ def _build_batch_prompt(
                 seen.add(label.lower())
                 cand_lines.append(f"  - {label} ({nq} questoes)")
 
+        no_candidates_hint = (
+            "\n  (nenhum candidato encontrado — retorne is_equivalent=false e suggested_match=null)"
+        )
         parts.append(
             f'[{i}] INPUT: tema="{input_tema}"'
             + (f' subtema="{input_subtema}"' if input_subtema else "")
             + "\n    CANDIDATOS ENCONTRADOS NO BANCO:"
-            + ("\n" + "\n".join(cand_lines) if cand_lines else "\n  (nenhum)")
-            + "\n    TAREFA: Qual candidato e o melhor match para o INPUT? O match atual esta correto ou existe um candidato melhor?"
+            + ("\n" + "\n".join(cand_lines) if cand_lines else no_candidates_hint)
+            + "\n    TAREFA: Avalie todos os candidatos e retorne o mais especifico e correto para o INPUT."
+            + ' Em "suggested_match" use APENAS o texto "tema" ou "tema | subtema" sem prefixos nem sufixos.'
         )
 
     return "\n\n".join(parts)
