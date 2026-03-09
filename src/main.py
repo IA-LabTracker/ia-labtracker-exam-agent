@@ -124,11 +124,12 @@ def _ensure_theme_stats_embeddings(db: DBClient, embedder) -> None:
     pending = db.get_theme_stats_without_embeddings()
     if not pending:
         return
+    logger.info("[embeddings] generating embeddings for %d theme_stats rows with embedding=NULL", len(pending))
     texts = [f"{s['tema']} {s['subtema'] or ''}" for s in pending]
     embeddings = embedder.embed_batch(texts)
-    for s, emb in zip(pending, embeddings):
-        db.update_theme_stat_embedding(s["id"], emb)
-    logger.info("Generated embeddings for %d theme_stats entries", len(pending))
+    updates = [(s["id"], emb) for s, emb in zip(pending, embeddings)]
+    db.update_theme_stat_embeddings_batch(updates)
+    logger.info("[embeddings] updated %d theme_stats embeddings", len(updates))
 
 
 def _create_llm_judge():

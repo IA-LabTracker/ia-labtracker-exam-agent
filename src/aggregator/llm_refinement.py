@@ -169,19 +169,29 @@ def apply_llm_judge(
     for idx, verdict in zip(review_indices, verdicts):
         r = results[idx]
 
-        if verdict.is_equivalent and verdict.confidence > r.match_score:
-            # LLM confirmed the current match with higher confidence — preserve existing per-institution counts
+        if verdict.is_equivalent:
+            # LLM confirmed the current match — always upgrade method to LLM.
+            # Use the higher of LLM confidence and current score so the row never regresses.
+            new_score = max(verdict.confidence, r.match_score)
+            # Derive equivalencia from resolved data if not already set
+            confirmed_equiv = r.input_equivalencia
+            if not confirmed_equiv and r.normalized_tema:
+                confirmed_equiv = (
+                    f"{r.normalized_tema} | {r.normalized_subtema}"
+                    if r.normalized_subtema
+                    else r.normalized_tema
+                )
             results[idx] = ReconciledRow(
                 input_tema=r.input_tema,
-                input_equivalencia=r.input_equivalencia,
+                input_equivalencia=confirmed_equiv,
                 normalized_tema=r.normalized_tema,
                 normalized_subtema=r.normalized_subtema,
                 questions_by_institution=r.questions_by_institution,
                 match_method=MATCH_LLM,
-                match_score=verdict.confidence,
-                match_label=_classify_temperature(MATCH_LLM, verdict.confidence),
+                match_score=new_score,
+                match_label=_classify_temperature(MATCH_LLM, new_score),
                 cor_hex=r.cor_hex,
-                notes=f"{r.notes}; LLM: {verdict.reasoning}",
+                notes=f"{r.notes}; LLM confirmado: {verdict.reasoning}",
             )
             improved += 1
 

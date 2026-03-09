@@ -50,7 +50,7 @@ class Settings:
         == "true"
     )
     llm_judge_model: str = field(
-        default_factory=lambda: os.getenv("LLM_JUDGE_MODEL", "gpt-4o-mini")
+        default_factory=lambda: os.getenv("LLM_JUDGE_MODEL", "gpt-5-mini-2025-08-07")
     )
     llm_judge_base_url: str = field(
         default_factory=lambda: os.getenv("LLM_JUDGE_BASE_URL", "")

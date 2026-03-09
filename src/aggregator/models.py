@@ -36,6 +36,15 @@ INSTITUTIONS: list[str] = [
     "USP SP",
 ]
 
+# Maps institution names as stored in theme_stats_all to the canonical INSTITUTIONS names.
+# theme_stats_all uses shorter abbreviations; this dict bridges the gap so question counts
+# from the DB get placed in the correct Excel column.
+INSTITUTION_ALIASES: dict[str, str] = {
+    "AMP": "AMP-PR",
+    "HEVV": "HEVV - HOSPITAL EVANGÉLICO DE VILA VELHA",
+    "INTO": "INTO RJ",
+}
+
 MATCH_EXACT = "exato"
 MATCH_FTS = "FTS"
 MATCH_SEMANTIC = "semântico"

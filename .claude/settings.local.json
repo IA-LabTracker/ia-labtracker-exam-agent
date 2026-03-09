@@ -32,7 +32,11 @@
       "Bash(python -m pytest tests/ -q --ignore=tests/test_aggregator.py)",
       "Bash(python -m pytest tests/test_aggregator.py -v)",
       "Bash(python -m pytest -v)",
-      "Bash(python -c \":*)"
+      "Bash(python -c \":*)",
+      "Bash(cat /c/projetos/ia-labtracker-exam-agent/sql/*.sql)",
+      "Bash(python3 -c \":*)",
+      "WebSearch",
+      "WebFetch(domain:platform.openai.com)"
     ],
     "additionalDirectories": [
       "c:\\projetos\\ia-labtracker-exam-agent\\src"

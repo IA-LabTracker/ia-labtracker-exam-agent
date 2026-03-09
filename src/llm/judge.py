@@ -116,10 +116,33 @@ def _build_batch_prompt(
 class LLMJudge:
     """Validates and improves match quality using an LLM."""
 
+    # Models that do not accept a custom temperature (only the API default is allowed)
+    _NO_TEMPERATURE_MODELS: frozenset[str] = frozenset({
+        "gpt-5-mini-2025-08-07",
+        "gpt-5-mini",
+        "o1",
+        "o1-mini",
+        "o1-preview",
+        "o3",
+        "o3-mini",
+        "o4-mini",
+    })
+
+    # Models that do not support response_format=json_object.
+    # For these, JSON output is requested via the system prompt only.
+    _NO_JSON_RESPONSE_FORMAT_MODELS: frozenset[str] = frozenset({
+        "o1",
+        "o1-mini",
+        "o1-preview",
+        "o3",
+        "o3-mini",
+        "o4-mini",
+    })
+
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-5-mini-2025-08-07",
         base_url: str | None = None,
         max_batch_size: int = 10,
         temperature: float = 0.1,
@@ -133,10 +156,14 @@ class LLMJudge:
         self._model = model
         self._max_batch_size = max_batch_size
         self._temperature = temperature
+        self._supports_temperature = model not in self._NO_TEMPERATURE_MODELS
+        self._supports_json_response_format = model not in self._NO_JSON_RESPONSE_FORMAT_MODELS
         logger.info(
-            "[LLMJudge] initialized: model=%s batch_size=%d",
+            "[LLMJudge] initialized: model=%s batch_size=%d temperature=%s json_format=%s",
             model,
             max_batch_size,
+            f"{temperature}" if self._supports_temperature else "default (not sent)",
+            "json_object" if self._supports_json_response_format else "prompt-only",
         )
 
     def judge_batch(
@@ -174,15 +201,18 @@ class LLMJudge:
         user_prompt = _build_batch_prompt(items, db_candidates)
 
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                temperature=self._temperature,
-                messages=[
+            call_kwargs: dict = {
+                "model": self._model,
+                "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                response_format={"type": "json_object"},
-            )
+            }
+            if self._supports_temperature:
+                call_kwargs["temperature"] = self._temperature
+            if self._supports_json_response_format:
+                call_kwargs["response_format"] = {"type": "json_object"}
+            response = self._client.chat.completions.create(**call_kwargs)
 
             content = response.choices[0].message.content or "{}"
             parsed = json.loads(content)

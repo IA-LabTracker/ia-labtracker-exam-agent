@@ -279,6 +279,19 @@ class DBClient:
             (str(embedding), stat_id),
         )
 
+    def update_theme_stat_embeddings_batch(
+        self, updates: list[tuple[int, list[float]]]
+    ) -> None:
+        """Update embeddings for multiple theme_stats rows in a single transaction."""
+        if not updates:
+            return
+        with self._lock:
+            with self.conn.transaction():
+                self.conn.executemany(
+                    "UPDATE theme_stats SET embedding = %s::vector WHERE id = %s",
+                    [(str(emb), stat_id) for stat_id, emb in updates],
+                )
+
     def semantic_search_theme_stats(
         self,
         query_embedding: list[float],
@@ -287,8 +300,8 @@ class DBClient:
         alpha: float = 0.7,
         beta: float = 0.3,
     ) -> list[dict]:
-        # Cache by (query_text, top_k) — same text always produces same embedding
-        cache_key = (query_text.lower().strip(), top_k)
+        # Cache by (query_text, top_k, alpha, beta) — all parameters affect the result
+        cache_key = (query_text.lower().strip(), top_k, alpha, beta)
         if cache_key in self._semantic_cache:
             return self._semantic_cache[cache_key]
 
@@ -355,15 +368,27 @@ class DBClient:
             if cache_key in self._inst_questions_cache:  # double-check after lock
                 return self._inst_questions_cache[cache_key]
 
-            # 1. Try theme_stats_all (canonical view)
+            # 1. Try theme_stats_all (canonical table — preferred)
             rows = self._fetch_inst_counts("theme_stats_all", tema, subtema)
 
             # 2. Fallback: theme_stats directly
             if not rows:
                 rows = self._fetch_inst_counts("theme_stats", tema, subtema)
 
-            # 3. Fallback: FTS on theme_stats — handles topic name variations across institutions
-            if not rows and not subtema:
+            # 3. If subtema produced no results, retry at tema level (sums all subtemas)
+            if not rows and subtema:
+                rows = self._fetch_inst_counts("theme_stats_all", tema, None)
+                if not rows:
+                    rows = self._fetch_inst_counts("theme_stats", tema, None)
+                if rows:
+                    logger.debug(
+                        "[get_questions_by_institution] subtema '%s' not found — fell back to tema-level for '%s'",
+                        subtema,
+                        tema,
+                    )
+
+            # 4. FTS fallback on theme_stats — handles topic name variations across institutions
+            if not rows:
                 try:
                     fts_rows = self.conn.execute(
                         "SELECT institution, SUM(num_questions) AS num_questions "
@@ -394,13 +419,38 @@ class DBClient:
         return result
 
     def get_all_theme_stats(self) -> list[dict]:
+        """Return one row per unique (tema, subtema) pair from theme_stats_all.
+
+        Aggregates across institutions so reverse_coverage doesn't process the
+        same tema+subtema combination multiple times (once per institution).
+        Falls back to theme_stats if theme_stats_all is empty.
+        """
         if self._all_theme_stats_cache is not None:
             return self._all_theme_stats_cache
         with self._lock:
             if self._all_theme_stats_cache is not None:  # double-check after lock
                 return self._all_theme_stats_cache
             rows = self.conn.execute(
-                "SELECT * FROM theme_stats ORDER BY num_questions DESC"
+                """
+                SELECT tema, subtema,
+                       SUM(num_questions) AS num_questions,
+                       MAX(cor_hex) AS cor_hex
+                FROM theme_stats_all
+                GROUP BY tema, subtema
+                ORDER BY num_questions DESC
+                """
             ).fetchall()
+            if not rows:
+                # Fallback: theme_stats if theme_stats_all is unpopulated
+                rows = self.conn.execute(
+                    """
+                    SELECT tema, subtema,
+                           SUM(num_questions) AS num_questions,
+                           MAX(cor_hex) AS cor_hex
+                    FROM theme_stats
+                    GROUP BY tema, subtema
+                    ORDER BY num_questions DESC
+                    """
+                ).fetchall()
             self._all_theme_stats_cache = [dict(r) for r in rows]
         return self._all_theme_stats_cache

@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
-from src.aggregator.models import INSTITUTIONS, ReconciledRow, ReverseRow
+from src.aggregator.models import INSTITUTION_ALIASES, INSTITUTIONS, ReconciledRow, ReverseRow
 from src.normalize.normalizer import classify_color
 from src.utils.logging import logger
 from src.utils.manchester_order import lookup_semana, format_semana, SEMANA_UNKNOWN, POS_UNKNOWN
@@ -132,8 +132,12 @@ def write_excel(
 
     # Build (record, cor_hex, qbi, sort_key) tuples so we can sort by Manchester order
     raw_entries: list[tuple[dict, str, dict, tuple[int, int]]] = []
-    # Pre-build case-insensitive lookup: lower(inst) → canonical inst name
+    # Pre-build case-insensitive lookup: lower(inst) → canonical inst name.
+    # Includes INSTITUTION_ALIASES so short DB names (e.g. "AMP") resolve to
+    # the canonical INSTITUTIONS entry (e.g. "AMP-PR").
     _inst_lower: dict[str, str] = {inst.lower(): inst for inst in INSTITUTIONS}
+    for alias, canonical in INSTITUTION_ALIASES.items():
+        _inst_lower[alias.lower()] = canonical
 
     for r in rows:
         d = asdict(r)
@@ -142,7 +146,7 @@ def write_excel(
         qbi_raw: dict[str, int] = d.pop("questions_by_institution", {})
 
         # Normalize institution names from DB to canonical INSTITUTIONS list
-        # (handles case differences, e.g. "amp-pr" → "AMP-PR")
+        # (handles case differences and abbreviations via INSTITUTION_ALIASES)
         qbi: dict[str, int] = {}
         for db_name, count in qbi_raw.items():
             canonical = _inst_lower.get(db_name.lower(), db_name)

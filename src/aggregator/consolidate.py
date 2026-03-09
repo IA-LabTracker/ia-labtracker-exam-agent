@@ -65,7 +65,12 @@ def reconcile_row(
         subtema_raw = str(subtema_raw).strip()
     else:
         subtema_raw = None
-    equivalencia = row.get("equivalencia")
+    _eq_raw = row.get("equivalencia")
+    equivalencia = (
+        str(_eq_raw).strip()
+        if _eq_raw and str(_eq_raw).strip().lower() not in ("nan", "none", "")
+        else None
+    )
     has_subtema = bool(subtema_raw)
     logger.debug(
         "[reconcile_row] processing tema='%s' subtema='%s'",
@@ -160,7 +165,10 @@ def reconcile_row(
     # --- Fetch per-institution question counts from theme_stats_all ---
     if resolved_tema or stat:
         lookup_tema = final_tema
-        lookup_subtema = final_subtema if has_subtema else None
+        # Only pass subtema when it was actually resolved from the DB (stat has it).
+        # Using the raw/normalized input subtema would produce no matches in theme_stats_all,
+        # causing every institution to show 0 questions.
+        lookup_subtema = stat.get("subtema") if (stat and stat.get("subtema")) else None
         questions_by_institution = db.get_questions_by_institution(
             lookup_tema, lookup_subtema
         )
@@ -189,6 +197,15 @@ def reconcile_row(
 
     notes = "; ".join(notes_parts)
     input_display = f"{tema_raw} | {subtema_raw}" if subtema_raw else tema_raw
+
+    # Safety net: equivalencia must always reflect the resolved match.
+    # Handles cases where the stat/resolved_tema paths didn't set it
+    # (e.g. NaN from pandas input or no DB match at all).
+    if not equivalencia_out and final_tema:
+        if final_subtema and has_subtema:
+            equivalencia_out = f"{final_tema} | {final_subtema}"
+        else:
+            equivalencia_out = final_tema
 
     return ReconciledRow(
         input_tema=input_display,
