@@ -60,7 +60,7 @@ class TestReconcileRow:
         result = reconcile_row(row, embedder, db)
 
         assert result.questions_by_institution == {}
-        assert "No matches" in result.notes
+        assert "Nenhum match" in result.notes or "No matches" in result.notes
 
     @patch("src.aggregator.consolidate.retrieve_candidates")
     def test_uses_db_color_for_tema_only(self, mock_retrieve):

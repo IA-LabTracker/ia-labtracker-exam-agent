@@ -118,11 +118,13 @@ def reconcile_row(
                 candidate_subtema,
                 db,
                 embedder,
-                tema_match,
             )
             if stat:
                 match_info = sub_match
-            # If subtema not found, keep match_info from tema resolution (don't reset to MATCH_NONE)
+            else:
+                # No cross-level: if subtema not found, reset to MATCH_NONE
+                # (don't inherit tema-level score for a subtema-level row)
+                match_info = MatchInfo()
         else:
             stat, _ = find_stat_tema_only(resolved_tema, db)
 
@@ -372,9 +374,10 @@ def reverse_coverage(
 
         matched_row = matched_map.get((stat_tema, stat_subtema))
 
+        # No cross-level: only match tema-level DB entries with tema-level reconciled rows
         if not matched_row and stat_subtema is None:
             for key, row in matched_map.items():
-                if key[0] == stat_tema:
+                if key[0] == stat_tema and key[1] is None:
                     if matched_row is None or row.match_score > matched_row.match_score:
                         matched_row = row
 

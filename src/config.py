@@ -21,14 +21,14 @@ class Settings:
     supabase_key: str = field(default_factory=lambda: os.getenv("SUPABASE_KEY", ""))
 
     embeddings_provider: str = field(
-        default_factory=lambda: os.getenv("EMBEDDINGS_PROVIDER", "local")
+        default_factory=lambda: os.getenv("EMBEDDINGS_PROVIDER", "openai")
     )
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
     embedding_model: str = field(
-        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "text-embedding-3-large")
     )
     embedding_dim: int = field(
-        default_factory=lambda: int(os.getenv("EMBEDDING_DIM", "384"))
+        default_factory=lambda: int(os.getenv("EMBEDDING_DIM", "768"))
     )
 
     hybrid_alpha: float = field(
@@ -38,10 +38,10 @@ class Settings:
         default_factory=lambda: float(os.getenv("HYBRID_BETA", "0.3"))
     )
     similarity_threshold: float = field(
-        default_factory=lambda: float(os.getenv("SIMILARITY_THRESHOLD", "0.4"))
+        default_factory=lambda: float(os.getenv("SIMILARITY_THRESHOLD", "0.50"))
     )
     retriever_top_k: int = field(
-        default_factory=lambda: int(os.getenv("RETRIEVER_TOP_K", "5"))
+        default_factory=lambda: int(os.getenv("RETRIEVER_TOP_K", "10"))
     )
 
     # LLM Judge (optional — improves low-confidence matches)
@@ -56,7 +56,7 @@ class Settings:
         default_factory=lambda: os.getenv("LLM_JUDGE_BASE_URL", "")
     )
     llm_judge_threshold: float = field(
-        default_factory=lambda: float(os.getenv("LLM_JUDGE_THRESHOLD", "0.60"))
+        default_factory=lambda: float(os.getenv("LLM_JUDGE_THRESHOLD", "0.95"))
     )
 
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))

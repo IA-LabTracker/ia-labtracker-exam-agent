@@ -120,7 +120,102 @@ async def ingest_stats(
         tmp_path.unlink(missing_ok=True)
 
 
+def _check_embedding_model_changed(db: DBClient) -> bool:
+    """Check if the current embedding model differs from what was used to generate stored embeddings.
+
+    Stores the model name in a metadata row. If it changed, all embeddings need regeneration.
+    """
+    settings = get_settings()
+    current_model = f"{settings.embeddings_provider}:{settings.embedding_model}:{settings.embedding_dim}"
+
+    try:
+        with db._lock:
+            # Use a simple key-value approach via a check on ingest_log or a direct query
+            row = db.conn.execute(
+                "SELECT file_name FROM ingest_log WHERE file_hash = '__embedding_model__' LIMIT 1"
+            ).fetchone()
+
+        if row and row["file_name"] == current_model:
+            return False  # Same model, no re-embedding needed
+
+        return True  # Model changed or first time
+    except Exception:
+        return True  # Be safe — assume changed
+
+
+def _record_embedding_model(db: DBClient) -> None:
+    """Record the current embedding model so we can detect changes."""
+    settings = get_settings()
+    current_model = f"{settings.embeddings_provider}:{settings.embedding_model}:{settings.embedding_dim}"
+    try:
+        with db._lock:
+            db.conn.execute(
+                """INSERT INTO ingest_log (file_name, file_hash, row_count)
+                   VALUES (%s, '__embedding_model__', 0)
+                   ON CONFLICT (file_hash) DO UPDATE SET file_name = EXCLUDED.file_name""",
+                (current_model,),
+            )
+    except Exception as exc:
+        logger.warning("[embeddings] failed to record model metadata: %s", exc)
+
+
+def _reembed_all_sync(db: DBClient, embedder) -> None:
+    """Re-generate ALL embeddings (theme_stats + questions) with the current model."""
+    # 1. Re-embed theme_stats
+    with db._lock:
+        all_stats = db.conn.execute("SELECT id, tema, subtema FROM theme_stats").fetchall()
+    stats_list = [dict(r) for r in all_stats]
+
+    if stats_list:
+        logger.info("[auto-reembed] re-generating embeddings for %d theme_stats rows", len(stats_list))
+        texts = [f"{s['tema']} {s['subtema'] or ''}" for s in stats_list]
+        embeddings = embedder.embed_batch(texts)
+        updates = [(s["id"], emb) for s, emb in zip(stats_list, embeddings)]
+        db.update_theme_stat_embeddings_batch(updates)
+        logger.info("[auto-reembed] updated %d theme_stats embeddings", len(updates))
+
+    # 2. Re-embed questions
+    with db._lock:
+        all_questions = db.conn.execute(
+            "SELECT id, raw_text, tema_normalized, subtema_normalized FROM questions"
+        ).fetchall()
+    questions_list = [dict(r) for r in all_questions]
+
+    if questions_list:
+        logger.info("[auto-reembed] re-generating embeddings for %d questions rows", len(questions_list))
+        texts = [
+            f"{q['tema_normalized'] or ''} {q['subtema_normalized'] or ''} {q['raw_text']}"
+            for q in questions_list
+        ]
+        for i in range(0, len(questions_list), 100):
+            chunk_q = questions_list[i : i + 100]
+            chunk_t = texts[i : i + 100]
+            embs = embedder.embed_batch(chunk_t)
+            with db._lock:
+                with db.conn.transaction():
+                    with db.conn.cursor() as cur:
+                        cur.executemany(
+                            "UPDATE questions SET embedding = %s::vector WHERE id = %s",
+                            [(str(emb), q["id"]) for q, emb in zip(chunk_q, embs)],
+                        )
+            logger.info("[auto-reembed] questions batch %d-%d done", i, min(i + 100, len(questions_list)))
+
+    db.clear_cache()
+    _record_embedding_model(db)
+    logger.info("[auto-reembed] complete: %d theme_stats + %d questions", len(stats_list), len(questions_list))
+
+
 def _ensure_theme_stats_embeddings(db: DBClient, embedder) -> None:
+    """Ensure all theme_stats have embeddings. Auto-detects model changes."""
+    # Check if the embedding model changed — if so, re-embed EVERYTHING
+    if _check_embedding_model_changed(db):
+        logger.warning(
+            "[embeddings] embedding model changed — re-generating ALL embeddings automatically"
+        )
+        _reembed_all_sync(db, embedder)
+        return
+
+    # Otherwise, just fill in any NULL embeddings (new rows)
     pending = db.get_theme_stats_without_embeddings()
     if not pending:
         return
@@ -130,6 +225,68 @@ def _ensure_theme_stats_embeddings(db: DBClient, embedder) -> None:
     updates = [(s["id"], emb) for s, emb in zip(pending, embeddings)]
     db.update_theme_stat_embeddings_batch(updates)
     logger.info("[embeddings] updated %d theme_stats embeddings", len(updates))
+
+
+@app.post("/reembed")
+async def reembed_all():
+    """Re-generate ALL embeddings using the current model.
+
+    MUST be called after switching embedding providers/models (e.g. local → OpenAI)
+    because embeddings from different models live in incompatible vector spaces.
+    """
+    db = get_db()
+    embedder = get_embedder()
+
+    # 1. Re-embed theme_stats (all rows, not just NULL)
+    with db._lock:
+        all_stats = db.conn.execute(
+            "SELECT id, tema, subtema FROM theme_stats"
+        ).fetchall()
+    stats_list = [dict(r) for r in all_stats]
+
+    if stats_list:
+        logger.info("[reembed] re-generating embeddings for %d theme_stats rows", len(stats_list))
+        texts = [f"{s['tema']} {s['subtema'] or ''}" for s in stats_list]
+        embeddings = embedder.embed_batch(texts)
+        updates = [(s["id"], emb) for s, emb in zip(stats_list, embeddings)]
+        db.update_theme_stat_embeddings_batch(updates)
+        logger.info("[reembed] updated %d theme_stats embeddings", len(updates))
+
+    # 2. Re-embed questions (all rows, not just NULL)
+    with db._lock:
+        all_questions = db.conn.execute(
+            "SELECT id, raw_text, tema_normalized, subtema_normalized FROM questions"
+        ).fetchall()
+    questions_list = [dict(r) for r in all_questions]
+
+    if questions_list:
+        logger.info("[reembed] re-generating embeddings for %d questions rows", len(questions_list))
+        texts = [
+            f"{q['tema_normalized'] or ''} {q['subtema_normalized'] or ''} {q['raw_text']}"
+            for q in questions_list
+        ]
+        # Batch in chunks of 100 to avoid API limits
+        for i in range(0, len(questions_list), 100):
+            chunk_q = questions_list[i : i + 100]
+            chunk_t = texts[i : i + 100]
+            embeddings = embedder.embed_batch(chunk_t)
+            with db._lock:
+                with db.conn.transaction():
+                    with db.conn.cursor() as cur:
+                        cur.executemany(
+                            "UPDATE questions SET embedding = %s::vector WHERE id = %s",
+                            [(str(emb), q["id"]) for q, emb in zip(chunk_q, embeddings)],
+                        )
+            logger.info("[reembed] questions batch %d-%d done", i, min(i + 100, len(questions_list)))
+
+    # Clear all caches since embeddings changed
+    db.clear_cache()
+
+    return {
+        "message": "Re-embedding complete",
+        "theme_stats_updated": len(stats_list),
+        "questions_updated": len(questions_list),
+    }
 
 
 def _create_llm_judge():

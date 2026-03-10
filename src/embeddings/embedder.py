@@ -69,21 +69,48 @@ class LocalEmbedder(BaseEmbedder):
 
 
 class OpenAIEmbedder(BaseEmbedder):
-    def __init__(self, api_key: str, model: str = "text-embedding-3-small"):
+    """OpenAI embeddings with optional dimension truncation.
+
+    Uses the `dimensions` parameter supported by text-embedding-3-* models
+    to produce vectors that match the DB schema (e.g. 768-dim) without
+    needing to alter the database.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "text-embedding-3-large",
+        dimensions: int | None = None,
+    ):
         super().__init__()
         from openai import OpenAI
 
         self._client = OpenAI(api_key=api_key)
         self._model = model
-        logger.info("Using OpenAI embedder: %s", model)
+        self._dimensions = dimensions
+        dim_str = f" (dimensions={dimensions})" if dimensions else ""
+        logger.info("Using OpenAI embedder: %s%s", model, dim_str)
 
     def _embed_uncached(self, text: str) -> list[float]:
-        resp = self._client.embeddings.create(model=self._model, input=[text])
+        kwargs: dict = {"model": self._model, "input": [text]}
+        if self._dimensions:
+            kwargs["dimensions"] = self._dimensions
+        resp = self._client.embeddings.create(**kwargs)
         return resp.data[0].embedding
 
     def _embed_batch_uncached(self, texts: list[str]) -> list[list[float]]:
-        resp = self._client.embeddings.create(model=self._model, input=texts)
-        return [d.embedding for d in resp.data]
+        # OpenAI API supports up to 2048 inputs per call; batch in chunks of 100
+        all_embeddings: list[list[float]] = []
+        for i in range(0, len(texts), 100):
+            chunk = texts[i : i + 100]
+            kwargs: dict = {"model": self._model, "input": chunk}
+            if self._dimensions:
+                kwargs["dimensions"] = self._dimensions
+            resp = self._client.embeddings.create(**kwargs)
+            # OpenAI may return results out of order — sort by index
+            sorted_data = sorted(resp.data, key=lambda d: d.index)
+            all_embeddings.extend(d.embedding for d in sorted_data)
+        return all_embeddings
 
 
 class Embedder:
@@ -94,5 +121,6 @@ class Embedder:
             return OpenAIEmbedder(
                 api_key=settings.openai_api_key,
                 model=settings.embedding_model,
+                dimensions=settings.embedding_dim if settings.embedding_dim else None,
             )
         return LocalEmbedder(model_name=settings.embedding_model)

@@ -51,8 +51,8 @@ MATCH_SEMANTIC = "semântico"
 MATCH_LLM = "LLM"
 MATCH_NONE = "sem match"
 
-# Minimum acceptable score — rows below this get retried with variants
-MIN_ACCEPTABLE_SCORE = 0.50
+# Minimum acceptable score — rows below this get retried with aggressive variants
+MIN_ACCEPTABLE_SCORE = 0.70
 
 
 @dataclass
@@ -65,27 +65,30 @@ class MatchInfo:
 
 
 def _classify_temperature(method: str, score: float) -> str:
-    """Classify match quality as quente/morno/frio based on method + score."""
+    """Classify match quality as quente/morno/frio based on method + score.
+
+    Thresholds calibrated for high-precision mode (target 95%+ accuracy).
+    """
     if method == MATCH_EXACT:
         return "🔴 Quente (exato)"
     if method == MATCH_FTS:
-        if score >= 0.7:
+        if score >= 0.80:
             return "🔴 Quente (FTS)"
-        if score >= 0.5:
+        if score >= 0.65:
             return "🟠 Morno (FTS)"
         return "🟡 Frio (FTS)"
     if method == MATCH_SEMANTIC:
-        if score >= 0.75:
+        if score >= 0.80:
             return "🔴 Quente (semântico)"
-        if score >= 0.6:
+        if score >= 0.70:
             return "🟠 Morno (semântico)"
-        if score >= 0.5:
+        if score >= 0.55:
             return "🟡 Frio (semântico)"
         return "🔵 Muito frio (semântico)"
     if method == MATCH_LLM:
-        if score >= 0.8:
+        if score >= 0.85:
             return "🔴 Quente (LLM)"
-        if score >= 0.6:
+        if score >= 0.70:
             return "🟠 Morno (LLM)"
         return "🟡 Frio (LLM)"
     return "⚪ Sem match"

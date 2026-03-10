@@ -33,58 +33,105 @@ class LLMVerdict:
 
 
 SYSTEM_PROMPT = """\
-Voce e um especialista em curriculos de residencia medica brasileira.
+Voce e um especialista senior em curriculos de residencia medica brasileira, com profundo conhecimento \
+de todas as bancas (FAMERP, USP, UNICAMP, UNIFESP, HIAE, HCPA, SCMSP, etc.).
 
-Sua tarefa: dado um tema de prova medica (INPUT) e uma lista de candidatos encontrados no banco de dados, \
-voce deve decidir qual candidato e o melhor match — ou se nenhum candidato e equivalente.
+Sua tarefa CRITICA: dado um tema de prova medica (INPUT) e uma lista de candidatos do banco de dados, \
+voce deve decidir qual candidato e o MELHOR match semantico — ou rejeitar TODOS se nenhum for equivalente.
 
-O sistema ja fez uma busca automatica e encontrou um MATCH ATUAL com um score de confianca. \
-Alem disso, fizemos buscas adicionais no banco e encontramos CANDIDATOS ALTERNATIVOS. \
-Voce deve analisar TODOS os candidatos e escolher o melhor.
+VOCE E A ULTIMA LINHA DE DEFESA. Matches incorretos prejudicam diretamente os alunos de residencia.
 
-Regras:
-1. Considere sinonimos medicos (ex: "IAM" = "Infarto Agudo do Miocardio" = "Sindrome Coronariana Aguda")
-2. Subtemas podem estar contidos em temas mais amplos (ex: "Triagem Neonatal" contem "Teste do Coracaozinho")
-3. Considere abreviacoes comuns (PCR, ITU, DPOC, RN, SCA, TEP, etc.)
-4. Diferentes bancas (FAMERP, USP, UNICAMP, UNIFESP) usam terminologias diferentes para o mesmo assunto
-5. Seja rigoroso: temas de especialidades diferentes NAO sao equivalentes
-6. Se um candidato alternativo for MELHOR que o match atual, sugira-o em "suggested_match"
-7. Se o match atual estiver correto, retorne is_equivalent=true e suggested_match=null
-8. Se nenhum candidato for bom, retorne is_equivalent=false e suggested_match=null
-9. PREFIRA SEMPRE o candidato MAIS ESPECIFICO: se o INPUT mencionar um subtopico especifico \
-(ex: "Inflamatorio", "Obstrutivo", "Cardiogenico", "Hipoglicemia"), escolha o candidato cujo subtema \
-melhor corresponda a essa especificidade. Evite "Aspectos Gerais" quando existir um candidato mais especifico disponivel.
-10. O valor de "suggested_match" DEVE ser copiado EXATAMENTE do texto de um dos candidatos listados \
-(incluindo "tema | subtema" com a mesma grafia). NAO invente texto novo.
-11. NAO considere equivalentes temas que apenas pertencem a mesma grande area medica, mas representam \
-doencas ou conteudos diferentes. Se o INPUT contem uma doenca especifica (ex: pneumonia, apendicite, meningite), \
-o candidato deve mencionar a MESMA doenca ou um sinonimo direto — nao aceite outras doencas da mesma especialidade.
-12. NAO marque como equivalente quando o INPUT e sobre trauma/patologia especifica e o candidato e sobre \
-organizacao/politica de saude (e vice-versa). Ex: "Trauma cranioencefalico" NAO e equivalente a \
-"Semiologia | Exame fisico e neuroanatomia".
+## PROCESSO DE RACIOCINIO (siga EXATAMENTE estes passos):
+1. IDENTIFIQUE o assunto medico especifico do INPUT (doenca, procedimento, conceito)
+2. IDENTIFIQUE a especialidade medica do INPUT (cardiologia, cirurgia, pediatria, etc.)
+3. Para CADA candidato, avalie:
+   a) O candidato trata da MESMA doenca/procedimento/conceito? (sinonimos contam)
+   b) O candidato pertence a MESMA especialidade ou contexto clinico?
+   c) O nivel de especificidade e compativel? (especifico → especifico, geral → geral)
+4. ESCOLHA o candidato mais especifico que satisfaz (a), (b) e (c)
+5. Se NENHUM candidato satisfaz os 3 criterios, retorne is_equivalent=false
 
-Exemplos de EQUIVALENCIA (aceitar):
-- INPUT "Avaliacao do RN | Triagem Neonatal" + candidato "Triagem neonatal | Teste do Coracaozinho" → EQUIVALENTES
-- INPUT "Trauma | Abordagem Inicial" + candidato "Politraumatizado | Atendimento Inicial" → EQUIVALENTES
-- INPUT "Abdome agudo Inflamatorio | Apendicite" + candidatos ["Abdome agudo | Aspectos Gerais", \
-"Abdome agudo | Apendicite aguda"] → PREFIRA "Abdome agudo | Apendicite aguda" (mais especifico)
-- INPUT "Choque | Choque Cardiogenico" + candidatos ["Cardiointensivismo | Choque (exceto choque septico)", \
-"Cardiointensivismo | Aspectos Gerais"] → PREFIRA "Cardiointensivismo | Choque (exceto choque septico)"
+## REGRAS DE EQUIVALENCIA (RIGOROSAS):
 
-Exemplos de NAO EQUIVALENCIA (rejeitar — erros comuns a evitar):
-- INPUT "Pneumonia" + candidato "DPOC" → NAO EQUIVALENTES (doencas distintas)
-- INPUT "Queimaduras" (Cirurgia) + candidato "Queimaduras" (Dermatologia) → NAO EQUIVALENTES (especialidades diferentes)
-- INPUT "Atendimento inicial ao politraumatizado | Vias Aereas" + candidato \
-"Politica nacional de atencao basica | Atribuicoes das equipes" → NAO EQUIVALENTES (trauma cirurgico != politica de saude)
-- INPUT "Pneumonia | Covid" + candidato "Infeccoes respiratorias agudas | Coqueluche" → NAO EQUIVALENTES (doencas distintas)
-- INPUT "Pneumonia | Abscesso Pulmonar" + candidato "Infeccoes respiratorias agudas | Sinusite bacteriana aguda" \
-→ NAO EQUIVALENTES (orgaos e doencas diferentes)
-- INPUT "Avaliacao do Recem-nascido | Dermatoses do RN" + candidato "Alojamento conjunto" \
-→ NAO EQUIVALENTES (dermatologia neonatal != organizacao da assistencia)
-- INPUT "Avaliacao neurologica | Trauma cranioencefalico" + candidato "Semiologia | Exame fisico e neuroanatomia" \
-→ NAO EQUIVALENTES (TCE e patologia traumatica especifica, nao exame clinico geral)
-- INPUT "Atendimento ao paciente queimado | Reposicao volemica" + candidato "Queimadura | Aspectos Gerais" \
-→ NAO EQUIVALENTES quando existir candidato especifico de reposicao volemica
+### ACEITAR como equivalente:
+R1. Sinonimos medicos diretos: "IAM" = "Infarto Agudo do Miocardio" = "SCA com supra de ST"
+R2. Abreviacoes reconhecidas: PCR, ITU, DPOC, RN, SCA, TEP, DM, HAS, ICC, AVC, TCE, etc.
+R3. Subtema contido em tema: "Triagem Neonatal" contem "Teste do Coracaozinho", "Teste do Pezinho"
+R4. Mesma entidade clinica com nomes diferentes entre bancas: \
+"Politraumatizado | Atendimento Inicial" = "Trauma | Abordagem Inicial ao Politraumatizado"
+R5. Hierarquia clinica: "Abdome agudo | Apendicite" pode mapear para "Abdome agudo | Apendicite aguda"
+R6. Equivalencias conceituais: "Reanimacao neonatal" = "Ressuscitacao do RN em sala de parto"
+
+### REJEITAR como NAO equivalente:
+R7. Doencas DIFERENTES da mesma especialidade: Pneumonia ≠ DPOC, Apendicite ≠ Colecistite, \
+Meningite ≠ Encefalite, Asma ≠ Bronquite, Diabetes ≠ Hipotireoidismo
+R8. Especialidades DIFERENTES: Queimadura (Cirurgia) ≠ Queimadura (Dermatologia), \
+Dor toracica (Cardiologia) ≠ Dor toracica (Pneumologia) — EXCETO quando o candidato e claramente \
+uma abordagem sindrômica que engloba ambas
+R9. Patologia especifica vs organizacao/politica: "TCE" ≠ "Semiologia neurologica", \
+"Pneumonia" ≠ "Politica de saude publica"
+R10. Generico vs Especifico SEM relacao direta: "Aspectos Gerais" so serve se NAO existir \
+candidato especifico que corresponda ao INPUT
+R11. Orgaos/sistemas diferentes: "Abscesso pulmonar" ≠ "Sinusite" (pulmao ≠ seios paranasais)
+R12. Procedimentos diferentes: "Parto cesario" ≠ "Parto normal", "Intubacao" ≠ "Traqueostomia" \
+(a menos que o contexto seja "via aerea" e ambos se encaixem)
+
+## REGRA DE ESPECIFICIDADE (PRIORITARIA):
+- Se o INPUT menciona subtopico especifico (ex: "Inflamatorio", "Obstrutivo", "Cardiogenico", \
+"Apendicite", "Colecistite", "Reposicao volemica"), SEMPRE prefira o candidato que corresponda \
+a essa especificidade.
+- So aceite "Aspectos Gerais" se NENHUM candidato especifico estiver disponivel.
+- Se o INPUT e generico (ex: "Abdome agudo") e existe candidato "Abdome agudo | Aspectos Gerais", \
+este e um bom match.
+
+## REGRA DO suggested_match:
+- O valor de "suggested_match" DEVE ser copiado EXATAMENTE do texto de um dos candidatos \
+(incluindo "tema | subtema" com a mesma grafia exata). NAO invente texto novo.
+- Se o match atual ja e o melhor, retorne is_equivalent=true e suggested_match=null.
+- Se um candidato alternativo e melhor, retorne is_equivalent=false e suggested_match com o texto exato.
+- Se nenhum candidato e bom, retorne is_equivalent=false e suggested_match=null.
+
+## ESCALA DE CONFIANCA:
+- 0.95-1.00: Sinonimo direto ou match exato (IAM = Infarto Agudo do Miocardio)
+- 0.85-0.94: Equivalencia clara com pequena diferenca de terminologia
+- 0.70-0.84: Equivalencia provavel — mesmo assunto, terminologia bem diferente
+- 0.50-0.69: Relacao parcial — mesma area mas pode nao ser a mesma entidade
+- 0.00-0.49: Sem equivalencia — assuntos diferentes
+
+## EXEMPLOS DETALHADOS:
+
+### EQUIVALENTES (aceitar):
+1. INPUT "Avaliacao do RN | Triagem Neonatal" + "Triagem neonatal | Teste do Coracaozinho" \
+→ EQUIVALENTES (confidence=0.90) — subtema contido no tema (R3)
+2. INPUT "Trauma | Abordagem Inicial" + "Politraumatizado | Atendimento Inicial" \
+→ EQUIVALENTES (confidence=0.92) — mesma entidade clinica (R4)
+3. INPUT "Abdome agudo Inflamatorio | Apendicite" + candidatos ["Abdome agudo | Aspectos Gerais", \
+"Abdome agudo | Apendicite aguda"] → PREFIRA "Abdome agudo | Apendicite aguda" (confidence=0.95) (R5, especificidade)
+4. INPUT "Choque | Choque Cardiogenico" + ["Cardiointensivismo | Choque (exceto choque septico)", \
+"Cardiointensivismo | Aspectos Gerais"] → PREFIRA "Cardiointensivismo | Choque (exceto choque septico)" \
+(confidence=0.88) (especificidade)
+5. INPUT "HAS" + "Hipertensao arterial sistemica | Tratamento farmacologico" \
+→ EQUIVALENTES (confidence=0.85) (R2 + R3)
+6. INPUT "Insuficiencia cardiaca" + "ICC | Diagnostico e tratamento" \
+→ EQUIVALENTES (confidence=0.95) (R1)
+7. INPUT "Saude da mulher | Pre-natal" + "Assistencia pre-natal | Acompanhamento" \
+→ EQUIVALENTES (confidence=0.88) (R4)
+
+### NAO EQUIVALENTES (rejeitar — erros CRITICOS a evitar):
+1. INPUT "Pneumonia" + "DPOC" → REJEITAR (R7 — doencas distintas do mesmo sistema respiratorio)
+2. INPUT "Queimaduras" (Cirurgia) + "Queimaduras" (Dermatologia) → REJEITAR (R8 — contextos diferentes)
+3. INPUT "Atendimento ao politraumatizado | Vias Aereas" + \
+"Politica nacional de atencao basica | Atribuicoes" → REJEITAR (R9 — trauma ≠ politica de saude)
+4. INPUT "Pneumonia | Covid" + "Infeccoes respiratorias | Coqueluche" → REJEITAR (R7 — agentes diferentes)
+5. INPUT "Pneumonia | Abscesso Pulmonar" + "Infeccoes respiratorias | Sinusite" → REJEITAR (R11 — orgaos diferentes)
+6. INPUT "Avaliacao do RN | Dermatoses do RN" + "Alojamento conjunto" → REJEITAR (R9 — conteudo ≠ organizacao)
+7. INPUT "Avaliacao neurologica | TCE" + "Semiologia | Exame fisico e neuroanatomia" → REJEITAR (R9 — patologia ≠ propedeutica)
+8. INPUT "Queimado | Reposicao volemica" + "Queimadura | Aspectos Gerais" \
+→ REJEITAR se existir candidato mais especifico de reposicao (R10, especificidade)
+9. INPUT "Diarreia aguda | Viral" + "Diarreia cronica | Doenca celiaca" → REJEITAR (R7 — doencas diferentes)
+10. INPUT "Ictericia neonatal | Fototerapia" + "Ictericia | Hepatite" → REJEITAR (R7 — etiologias diferentes)
+11. INPUT "Sepse neonatal" + "Sepse | Choque septico no adulto" → REJEITAR (R8 — populacoes diferentes)
+12. INPUT "Diabetes mellitus tipo 1" + "Diabetes mellitus tipo 2" → REJEITAR (R7 — doencas distintas)
 
 Responda SEMPRE em JSON valido:
 {
@@ -94,7 +141,7 @@ Responda SEMPRE em JSON valido:
       "is_equivalent": true/false,
       "confidence": 0.0-1.0,
       "suggested_match": "tema | subtema EXATAMENTE como listado nos candidatos, ou null",
-      "reasoning": "Explicacao curta do por que (1-2 frases)"
+      "reasoning": "1) Assunto do INPUT: [X]. 2) Melhor candidato: [Y]. 3) Conclusao: [aceito/rejeito] porque [motivo]"
     }
   ]
 }"""
@@ -135,17 +182,17 @@ def _build_batch_prompt(
     for i, (item, candidates) in enumerate(zip(items, db_candidates)):
         input_tema = item.get("input_tema", "")
         input_subtema = item.get("input_subtema", "")
+        equivalencia = item.get("equivalencia", "")
         current_match = item.get("current_match", "")
         current_score = item.get("current_score", 0)
+        match_method = item.get("match_method", "")
 
         cand_lines = []
         seen = set()
         # Include current match as first candidate.
-        # Show "(sem match automático)" when score=0 so the LLM doesn't
-        # interpret it as "a match exists but with zero confidence".
         if current_match:
             if current_score > 0:
-                score_str = f"score={current_score:.0%}"
+                score_str = f"score={current_score:.0%}, metodo={match_method}"
             else:
                 score_str = "sem match automatico"
             cand_lines.append(
@@ -153,7 +200,7 @@ def _build_batch_prompt(
             )
             seen.add(current_match.lower())
 
-        for c in candidates[:10]:
+        for c in candidates[:12]:
             t = c.get("tema", "")
             s = c.get("subtema", "")
             nq = c.get("num_questions", 0)
@@ -165,12 +212,19 @@ def _build_batch_prompt(
         no_candidates_hint = (
             "\n  (nenhum candidato encontrado — retorne is_equivalent=false e suggested_match=null)"
         )
+
+        input_line = f'[{i}] INPUT: tema="{input_tema}"'
+        if input_subtema:
+            input_line += f' subtema="{input_subtema}"'
+        if equivalencia:
+            input_line += f'\n    EQUIVALENCIA INFORMADA PELO USUARIO: "{equivalencia}"'
+
         parts.append(
-            f'[{i}] INPUT: tema="{input_tema}"'
-            + (f' subtema="{input_subtema}"' if input_subtema else "")
+            input_line
             + "\n    CANDIDATOS ENCONTRADOS NO BANCO:"
             + ("\n" + "\n".join(cand_lines) if cand_lines else no_candidates_hint)
-            + "\n    TAREFA: Avalie todos os candidatos e retorne o mais especifico e correto para o INPUT."
+            + "\n    TAREFA: Siga o PROCESSO DE RACIOCINIO. Identifique o assunto do INPUT, compare com CADA candidato,"
+            + " e escolha o mais especifico e correto. Se a EQUIVALENCIA do usuario apontar para um candidato valido, considere-a."
             + ' Em "suggested_match" use APENAS o texto "tema" ou "tema | subtema" sem prefixos nem sufixos.'
         )
 
@@ -208,8 +262,8 @@ class LLMJudge:
         api_key: str,
         model: str = "gpt-5-mini-2025-08-07",
         base_url: str | None = None,
-        max_batch_size: int = 10,
-        temperature: float = 0.1,
+        max_batch_size: int = 5,
+        temperature: float = 0.0,
     ):
         from openai import OpenAI
 

@@ -53,13 +53,14 @@ def resolve_tema(
             return t, info
 
     # FTS fallback — try tema_raw, norm_tema, and equivalencia as hints
+    # Scores lowered to force LLM validation for all FTS matches
     for i, q in enumerate([tema_raw, norm_tema, equivalencia]):
         if not q:
             continue
         stat = db.find_best_theme_stat(q)
         if stat:
             resolved = stat.get("tema", "")
-            fts_score = 0.80 - (i * 0.10)
+            fts_score = 0.70 - (i * 0.10)
             logger.debug(
                 "[resolve_tema] FTS match for tema='%s' (query='%s' score=%.2f)",
                 resolved,
@@ -95,11 +96,12 @@ def _semantic_resolve_tema(
     query: str,
     db: DBClient,
     embedder: BaseEmbedder,
-    threshold: float = 0.50,
+    threshold: float = 0.55,
 ) -> tuple[str | None, float]:
     """Use embedding similarity on theme_stats to find the best match.
 
     Batch-embeds the query + word chunks in a single call for speed.
+    Uses top_k=7 to get more candidates for better precision.
     """
     words = [w.strip() for w in query.split() if len(w.strip()) > 3]
     queries = [query]
@@ -118,7 +120,7 @@ def _semantic_resolve_tema(
         results = db.semantic_search_theme_stats(
             query_embedding=emb,
             query_text=q,
-            top_k=3,
+            top_k=7,
         )
         if results:
             score = results[0].get("hybrid_score", 0) or 0
@@ -141,23 +143,12 @@ def _semantic_resolve_tema(
 def find_stat_tema_only(resolved_tema: str, db: DBClient) -> tuple[dict | None, int]:
     """For tema-only input: find the tema-level stat.
 
-    Only returns tema-level rows (subtema IS NULL).
-    If only subtema-level rows exist, aggregates their num_questions.
+    No cross-level: only returns tema-level rows (subtema IS NULL).
+    Does NOT aggregate subtema rows into a synthetic tema stat.
     """
     stat = db.get_theme_stat(resolved_tema, None)
     if stat:
         return stat, stat["num_questions"]
-
-    subtemas = db.get_subtemas_for_tema(resolved_tema)
-    if subtemas:
-        total = sum(s.get("num_questions", 0) for s in subtemas)
-        synthetic = {
-            **subtemas[0],
-            "subtema": None,
-            "category": "tema",
-            "num_questions": total,
-        }
-        return synthetic, total
 
     return None, 0
 
@@ -174,23 +165,21 @@ def find_stat_with_subtema(
     candidate_subtema: str | None,
     db: DBClient,
     embedder: BaseEmbedder | None = None,
-    tema_match: MatchInfo | None = None,
 ) -> tuple[dict | None, MatchInfo]:
-    """Comparison #2 — subtema vs subtema (under the already-resolved tema)."""
-    base = tema_match or MatchInfo()
+    """Comparison #2 — subtema vs subtema (under the already-resolved tema).
 
+    No cross-level: scores are based purely on the subtema match quality,
+    independent of how the tema was resolved.
+    """
     # Exact subtema matches
     for sub in [candidate_subtema, norm_subtema, subtema_raw]:
         if not sub:
             continue
         stat = db.get_theme_stat(resolved_tema, sub)
         if stat:
-            if base.method == MATCH_EXACT:
-                info = MatchInfo(
-                    MATCH_EXACT, 1.0, _classify_temperature(MATCH_EXACT, 1.0)
-                )
-            else:
-                info = MatchInfo(base.method, base.score, base.label)
+            info = MatchInfo(
+                MATCH_EXACT, 1.0, _classify_temperature(MATCH_EXACT, 1.0)
+            )
             return stat, info
 
     # FTS — only accept results whose tema matches the resolved tema
@@ -199,9 +188,8 @@ def find_stat_with_subtema(
             continue
         stat = db.find_best_theme_stat(f"{resolved_tema} | {sub}")
         if stat and stat.get("tema", "").lower() == resolved_tema.lower():
-            fts_sub_score = 0.75 - (i * 0.10)
-            score = min(base.score, fts_sub_score)
-            info = MatchInfo(MATCH_FTS, score, _classify_temperature(MATCH_FTS, score))
+            fts_sub_score = 0.70 - (i * 0.10)
+            info = MatchInfo(MATCH_FTS, fts_sub_score, _classify_temperature(MATCH_FTS, fts_sub_score))
             return stat, info
 
     # Semantic fallback — capped at 3 query variants to avoid DB query explosion.
@@ -239,7 +227,7 @@ def find_stat_with_subtema(
                     "subtema"
                 ):
                     score = r.get("hybrid_score", 0) or 0
-                    if score > best_score and score >= 0.45:
+                    if score > best_score and score >= 0.55:
                         best_result = r
                         best_score = score
             # Early exit: already found a strong match — skip remaining queries
@@ -247,23 +235,15 @@ def find_stat_with_subtema(
                 break
 
         if best_result:
-            # Cap the subtema semantic score at the tema resolution score.
-            # Without this, a wrong tema resolved at 44% whose subtema happens to
-            # score 66% would produce a misleadingly high final confidence (66%)
-            # that bypasses the LLM judge threshold.  The overall match cannot be
-            # more confident than the weakest link (tema resolution).
-            capped_score = min(best_score, base.score) if base.score > 0 else best_score
             logger.debug(
-                "[find_stat_with_subtema] semantic match subtema='%s' raw_score=%.3f capped=%.3f (base=%.3f)",
+                "[find_stat_with_subtema] semantic match subtema='%s' score=%.3f",
                 best_result["subtema"],
                 best_score,
-                capped_score,
-                base.score,
             )
             info = MatchInfo(
                 MATCH_SEMANTIC,
-                capped_score,
-                _classify_temperature(MATCH_SEMANTIC, capped_score),
+                best_score,
+                _classify_temperature(MATCH_SEMANTIC, best_score),
             )
             return best_result, info
 
@@ -281,27 +261,53 @@ def retry_low_score(
     embedder: BaseEmbedder,
     db: DBClient,
 ) -> ReconciledRow | None:
-    """Lightweight retry — batch-embeds variant queries and picks best semantic match."""
+    """Aggressive retry — tries multiple search strategies to find the best match.
+
+    Strategy 1: Original query variants (equivalencia, tema+subtema, tema+keywords)
+    Strategy 2: FTS search with each variant
+    Strategy 3: Broader semantic search with higher top_k
+    Strategy 4: Individual word-level searches for rare terms
+    """
     tema_raw = str(row.get("tema", "")).strip()
     subtema_raw = row.get("subtema")
     equivalencia = row.get("equivalencia")
     has_subtema = subtema_raw and str(subtema_raw).strip().lower() != "nan"
 
+    # Build comprehensive variant list
     variants = []
-    if equivalencia and str(equivalencia).strip().lower() != "nan":
-        variants.append(str(equivalencia).strip())
+    if equivalencia and str(equivalencia).strip().lower() not in ("nan", "none", ""):
+        eq = str(equivalencia).strip()
+        variants.append(eq)
+        # If equivalencia has pipe, also try the parts
+        if "|" in eq:
+            parts = [p.strip() for p in eq.split("|")]
+            variants.extend(parts)
+
     if has_subtema:
         sub = str(subtema_raw).strip()
         variants.append(f"{tema_raw} {sub}")
+        variants.append(sub)  # subtema alone
         for word in sub.split():
             if len(word) > 3:
                 variants.append(f"{tema_raw} {word}")
+    else:
+        # Tema-only: try individual meaningful words
+        for word in tema_raw.split():
+            if len(word) > 4:
+                variants.append(word)
+
+    # Also try the raw tema alone
+    if tema_raw not in variants:
+        variants.append(tema_raw)
+
     if not variants:
         return None
 
+    # --- Strategy 1+3: Semantic search with all variants (top_k=7 for broader results) ---
     embeddings = embedder.embed_batch(variants)
 
     best_tema = None
+    best_subtema = None
     best_score = original.match_score
     best_query = None
 
@@ -309,24 +315,57 @@ def retry_low_score(
         results = db.semantic_search_theme_stats(
             query_embedding=emb,
             query_text=query,
-            top_k=3,
+            top_k=7,
         )
-        if results and (results[0].get("hybrid_score", 0) or 0) > best_score:
-            best_score = results[0]["hybrid_score"]
-            best_tema = results[0]["tema"]
-            best_query = query
-            if best_score >= MIN_ACCEPTABLE_SCORE:
-                break
+        for r in results:
+            score = r.get("hybrid_score", 0) or 0
+            # No cross-level: if input has subtema, only accept subtema-level results
+            if has_subtema and not r.get("subtema"):
+                continue
+            # No cross-level: if input is tema-only, only accept tema-level results
+            if not has_subtema and r.get("subtema"):
+                continue
+            if score > best_score:
+                best_score = score
+                best_tema = r["tema"]
+                best_subtema = r.get("subtema")
+                best_query = query
+        if best_score >= MIN_ACCEPTABLE_SCORE:
+            break
+
+    # --- Strategy 2: FTS search with each variant ---
+    if best_score < MIN_ACCEPTABLE_SCORE:
+        for v in variants:
+            stat = db.find_best_theme_stat(v)
+            if stat:
+                # No cross-level: enforce level match
+                if has_subtema and not stat.get("subtema"):
+                    continue
+                if not has_subtema and stat.get("subtema"):
+                    continue
+                fts_score = 0.65
+                if fts_score > best_score:
+                    best_score = fts_score
+                    best_tema = stat["tema"]
+                    best_subtema = stat.get("subtema")
+                    best_query = f"FTS: {v}"
+                if best_score >= MIN_ACCEPTABLE_SCORE:
+                    break
 
     if not best_tema or best_score <= original.match_score:
         return None
 
-    stat, num_q = find_stat_tema_only(best_tema, db)
+    # No cross-level: get stat strictly at the matched level
+    stat = None
+    if has_subtema and best_subtema:
+        stat = db.get_theme_stat(best_tema, best_subtema)
+    elif not has_subtema:
+        stat, _ = find_stat_tema_only(best_tema, db)
     if not stat:
         return None
 
-    qbi = db.get_questions_by_institution(best_tema)
-    total_q = sum(qbi.values()) if qbi else num_q
+    qbi = db.get_questions_by_institution(best_tema, best_subtema)
+    total_q = sum(qbi.values()) if qbi else 0
     _, cor_hex = classify_color(total_q)
     info = MatchInfo(
         MATCH_SEMANTIC,
@@ -339,12 +378,12 @@ def retry_low_score(
         input_tema=input_display,
         input_equivalencia=equivalencia,
         normalized_tema=best_tema,
-        normalized_subtema=original.normalized_subtema,
+        normalized_subtema=best_subtema or original.normalized_subtema,
         questions_by_institution=qbi,
         match_method=info.method,
         match_score=info.score,
         match_label=info.label,
         cor_hex=cor_hex,
-        notes=f"Retry via '{best_query[:40]}'; "
+        notes=f"Retry via '{best_query[:50]}'; "
         f"Fonte: {stat.get('institution', 'N/A')}",
     )

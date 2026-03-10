@@ -38,7 +38,12 @@
       "WebSearch",
       "WebFetch(domain:platform.openai.com)",
       "Read(//c/Users/Patrick/.claude/projects/c--projetos-ia-labtracker-exam-agent/memory/**)",
-      "Bash(python -W ignore -c \":*)"
+      "Bash(python -W ignore -c \":*)",
+      "Bash(grep -E \"\\\\.\\(md|txt\\)$|^d\")",
+      "Bash(wc -l /c/projetos/ia-labtracker-exam-agent/src/**/*.py)",
+      "Bash(python -m pytest tests/test_aggregator.py::TestReconcileRow::test_no_matches_produces_notes -v)",
+      "Bash(python -c \"from src.config import get_settings; s=get_settings\\(\\); print\\(f''threshold={s.llm_judge_threshold}, sim={s.similarity_threshold}''\\)\")",
+      "Bash(python -m pytest tests/ -v --tb=short)"
     ],
     "additionalDirectories": [
       "c:\\projetos\\ia-labtracker-exam-agent\\src"

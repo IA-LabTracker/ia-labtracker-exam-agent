@@ -376,17 +376,8 @@ class DBClient:
             if not rows:
                 rows = self._fetch_inst_counts("theme_stats", tema, subtema)
 
-            # 3. If subtema produced no results, retry at tema level (sums all subtemas)
-            if not rows and subtema:
-                rows = self._fetch_inst_counts("theme_stats_all", tema, None)
-                if not rows:
-                    rows = self._fetch_inst_counts("theme_stats", tema, None)
-                if rows:
-                    logger.debug(
-                        "[get_questions_by_institution] subtema '%s' not found — fell back to tema-level for '%s'",
-                        subtema,
-                        tema,
-                    )
+            # No cross-level: do NOT fall back to tema-level when subtema produces no results.
+            # Each level is queried strictly at its own level.
 
             # 4. FTS fallback on theme_stats — handles topic name variations across institutions
             if not rows:
